@@ -137,7 +137,7 @@ async def startup():
         limits=limits, timeout=timeout, follow_redirects=True,
     )
     await load_state()
-    logger.info(f"🚀 RVG Gateway v8.1 started on port {CONFIG['port']}")
+    logger.info(f"🚀 RVG Gateway v8.2 started on port {CONFIG['port']}")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -190,12 +190,8 @@ def is_link_expired(link: dict) -> bool:
         return False
 
 def is_link_allowed(link: dict | None) -> bool:
-    """
-    ✅ FIX: اگه link وجود نداشته باشه → رد کن (قبلاً True برمیگشت!)
-    True فقط اگه لینک موجود، فعال، منقضی‌نشده و در سهمیه باشه
-    """
     if link is None:
-        return False  # ← FIX: UUID ناشناس رد میشه
+        return False
     if not link.get("active", True):
         return False
     if is_link_expired(link):
@@ -408,17 +404,15 @@ async def delete_link(uid: str, _=Depends(require_auth)):
     return {"ok": True, "deleted": uid}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# VLESS Relay — بهینه‌شده برای حداکثر throughput
+# VLESS Relay
 # ══════════════════════════════════════════════════════════════════════════════
-
-# بافر 256KB برای throughput بالاتر
 RELAY_BUF = 256 * 1024
 
 async def parse_vless_header(chunk: bytes):
     if len(chunk) < 24:
         raise ValueError("chunk too small")
-    pos = 1  # skip version
-    pos += 16  # skip uuid bytes
+    pos = 1
+    pos += 16
     addon_len = chunk[pos]; pos += 1 + addon_len
     command = chunk[pos]; pos += 1
     port = int.from_bytes(chunk[pos:pos+2], "big"); pos += 2
@@ -436,13 +430,9 @@ async def parse_vless_header(chunk: bytes):
     return command, address, port, chunk[pos:]
 
 async def check_and_use(uid: str, n: int) -> bool:
-    """
-    ✅ FIX: UUID ناشناس → رد کن (قبلاً True برمیگشت!)
-    چک کوتا + فعال/منقضی بودن لینک
-    """
+    """Check quota + active/expired for EXACT uuid — no fallback"""
     async with LINKS_LOCK:
         link = LINKS.get(uid)
-        # ← FIX: اگه لینک وجود نداشته باشه رد کن
         if link is None:
             return False
         if not is_link_allowed(link):
@@ -452,10 +442,7 @@ async def check_and_use(uid: str, n: int) -> bool:
         hourly_traffic[datetime.now().strftime("%H:00")] += n
     return True
 
-# ── Relay بهینه: بدون await drain در هر بسته ────────────────────────────────
-
 async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str):
-    """WebSocket → TCP با بافر جمع‌شده برای کاهش سربار"""
     try:
         while True:
             msg = await ws.receive()
@@ -464,14 +451,12 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
             data = msg.get("bytes") or (msg.get("text") or "").encode()
             if not data:
                 continue
-            # ✅ FIX: چک میکنه لینک هنوز فعاله
             if not await check_and_use(uid, len(data)):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
             stats["total_requests"] += 1
             connections[conn_id]["bytes"] += len(data)
             writer.write(data)
-            # drain فقط وقتی بافر پر باشه → کمتر سربار
             if writer.transport.get_write_buffer_size() > RELAY_BUF:
                 await writer.drain()
     except (WebSocketDisconnect, Exception):
@@ -483,20 +468,16 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
             pass
 
 async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: str, uid: str):
-    """TCP → WebSocket با خواندن greedy برای throughput بالاتر"""
     first = True
     try:
         while True:
-            # readany → بلافاصله هر داده‌ای که آماده‌ست برمیگردونه
             data = await reader.read(RELAY_BUF)
             if not data:
                 break
-            # ✅ FIX: چک میکنه لینک هنوز فعاله
             if not await check_and_use(uid, len(data)):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
             connections[conn_id]["bytes"] += len(data)
-            # هدر VLESS response فقط برای اولین پکت
             payload = (b"\x00\x00" + data) if first else data
             first = False
             await ws.send_bytes(payload)
@@ -507,12 +488,11 @@ async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: 
 async def websocket_tunnel(ws: WebSocket, uuid: str):
     await ws.accept()
 
-    # ✅ FIX: اول چک کن UUID در لینک‌ها هست و مجاز است
+    # Strict UUID check — only registered, active, non-expired, non-quota links pass
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
 
     if not is_link_allowed(link):
-        # UUID ناشناس، حذف‌شده، غیرفعال، منقضی یا تموم‌شده سهمیه
         logger.warning(f"🚫 WS rejected uuid={uuid[:8]}… (not allowed)")
         await ws.close(code=1008, reason="not authorized")
         return
@@ -532,7 +512,6 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
 
         command, address, port, payload = await parse_vless_header(first_chunk)
 
-        # ✅ چک مجدد بعد از دریافت هدر (ممکنه بین accept و اینجا تغییر کرده باشه)
         if not await check_and_use(uuid, len(first_chunk)):
             await ws.close(code=1008, reason="quota/disabled")
             return
@@ -541,12 +520,10 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
         connections[conn_id]["bytes"] += len(first_chunk)
         logger.info(f"➡️  [{conn_id}] → {address}:{port}")
 
-        # TCP با TCP_NODELAY برای کاهش تأخیر
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(address, port),
             timeout=10.0
         )
-        # فعال‌سازی TCP_NODELAY → کاهش latency
         sock = writer.transport.get_extra_info('socket')
         if sock:
             import socket
@@ -556,7 +533,6 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
             writer.write(payload)
             await writer.drain()
 
-        # هر دو relay موازی، اولی که تموم شد بقیه هم cancel
         done, pending = await asyncio.wait(
             {
                 asyncio.create_task(relay_ws_to_tcp(ws, writer, conn_id, uuid)),
@@ -675,7 +651,7 @@ input:focus+.ic{color:var(--accent)}
   <div class="card">
     <div class="brand">
       <div class="brand-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="codebox"></div>
-      <div><div class="brand-name">codebox</div><div class="brand-sub">RVG Gateway · v8.1</div></div>
+      <div><div class="brand-name">codebox</div><div class="brand-sub">RVG Gateway · v8.2</div></div>
     </div>
     <h1>ورود به پنل</h1>
     <p class="sub">رمز عبور را برای دسترسی به داشبورد وارد کنید</p>
@@ -838,6 +814,8 @@ a{color:inherit;text-decoration:none}
 .btn-g:hover{background:rgba(59,130,246,.22)}
 .btn-d{background:var(--red-bg);color:var(--red-t);border:1px solid rgba(239,68,68,.2)}
 .btn-d:hover{background:rgba(239,68,68,.2)}
+.btn-amber{background:var(--amber-bg);color:var(--amber-t);border:1px solid rgba(245,158,11,.2)}
+.btn-amber:hover{background:rgba(245,158,11,.2)}
 .btn-sm{padding:5px 9px;font-size:10.5px;border-radius:7px}
 .card{background:var(--card);border:1px solid var(--card-b);border-radius:var(--radius);padding:18px 20px;transition:border-color .2s,background .3s}
 .card:hover{border-color:var(--card-bh)}
@@ -910,13 +888,52 @@ a{color:inherit;text-decoration:none}
 .ibadge{display:inline-block;margin-top:9px;font-size:9px;padding:2px 8px;border-radius:20px;font-weight:700}
 .ibadge.done{background:var(--green-bg);color:var(--green-t)}
 .ibadge.plan{background:var(--accent-d);color:var(--accent2)}
-.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(40px);background:var(--card);border:1px solid var(--card-b);color:var(--t1);border-radius:10px;padding:10px 18px;font-size:12.5px;opacity:0;transition:all .25s;z-index:999;pointer-events:none;display:flex;align-items:center;gap:8px;box-shadow:var(--shadow);white-space:nowrap}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(40px);background:var(--card);border:1px solid var(--card-b);color:var(--t1);border-radius:10px;padding:10px 18px;font-size:12.5px;opacity:0;transition:all .25s;z-index:9999;pointer-events:none;display:flex;align-items:center;gap:8px;box-shadow:var(--shadow);white-space:nowrap}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast.ok{border-color:rgba(16,185,129,.3);background:var(--green-bg);color:var(--green-t)}
 .toast.err{border-color:rgba(239,68,68,.3);background:var(--red-bg);color:var(--red-t)}
 .dash-footer{border-top:1px solid var(--card-b);margin-top:14px;padding-top:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
 .df-text{font-size:10px;color:var(--t3)}
 .df-link{font-size:11.5px;color:var(--accent2);display:flex;align-items:center;gap:5px;font-weight:600}
+
+/* ── MODAL BASE ────────────────────────────────────────── */
+.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(6px);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;pointer-events:none;transition:opacity .25s}
+.modal-backdrop.open{opacity:1;pointer-events:all}
+.modal{background:var(--card);border:1px solid var(--card-b);border-radius:20px;width:100%;max-width:520px;box-shadow:0 25px 80px rgba(0,0,0,.5);transform:translateY(18px) scale(.97);transition:transform .25s,opacity .25s;opacity:0;max-height:90vh;overflow-y:auto}
+.modal-backdrop.open .modal{transform:none;opacity:1}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:20px 22px 16px;border-bottom:1px solid var(--card-b)}
+.modal-title{font-size:14px;font-weight:700;color:var(--t1);display:flex;align-items:center;gap:8px}
+.modal-title i{color:var(--accent);font-size:17px}
+.modal-close{background:var(--accent-d);border:1px solid var(--card-b);color:var(--t2);width:30px;height:30px;border-radius:8px;font-size:16px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:.15s;flex-shrink:0}
+.modal-close:hover{background:var(--red-bg);color:var(--red-t);border-color:rgba(239,68,68,.2)}
+.modal-body{padding:20px 22px}
+.modal-footer{padding:14px 22px 20px;display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--card-b)}
+
+/* ── QR MODAL ──────────────────────────────────────────── */
+#qr-modal .modal{max-width:360px}
+.qr-wrap{display:flex;flex-direction:column;align-items:center;gap:16px;padding:10px 0}
+.qr-img{width:240px;height:240px;border-radius:12px;border:3px solid var(--card-b);background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.qr-img img{width:100%;height:100%}
+.qr-link{font-family:ui-monospace,monospace;font-size:10px;color:var(--t3);word-break:break-all;background:var(--accent-d);padding:8px 12px;border-radius:8px;text-align:center;line-height:1.7;width:100%}
+
+/* ── DONATE MODAL ──────────────────────────────────────── */
+#donate-modal .modal{max-width:440px}
+.donate-hero{background:linear-gradient(135deg,rgba(59,130,246,.15),rgba(139,92,246,.1));border:1px solid rgba(59,130,246,.2);border-radius:14px;padding:22px;text-align:center;margin-bottom:18px}
+.donate-emoji{font-size:44px;margin-bottom:10px;display:block;animation:heartbeat 1.4s ease-in-out infinite}
+@keyframes heartbeat{0%,100%{transform:scale(1)}50%{transform:scale(1.12)}}
+.donate-title{font-size:17px;font-weight:700;color:var(--t1);margin-bottom:6px}
+.donate-sub{font-size:12px;color:var(--t2);line-height:1.8}
+.donate-btn{display:flex;align-items:center;justify-content:center;gap:10px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border-radius:12px;padding:14px 20px;font-size:14px;font-weight:700;font-family:inherit;border:none;cursor:pointer;width:100%;transition:.2s;box-shadow:0 4px 20px rgba(245,158,11,.35);text-decoration:none;margin-bottom:10px}
+.donate-btn:hover{filter:brightness(1.1);transform:translateY(-1px)}
+.donate-skip{background:transparent;border:1px solid var(--card-b);color:var(--t3);border-radius:10px;padding:9px 16px;font-size:11.5px;font-family:inherit;cursor:pointer;width:100%;transition:.15s}
+.donate-skip:hover{background:var(--accent-d);color:var(--t2)}
+
+/* ── EDIT MODAL ─────────────────────────────────────────── */
+#edit-modal .modal{max-width:500px}
+.edit-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.edit-grid .fg-full{grid-column:1/-1}
+.fi-full{width:100%}
+
 @media(max-width:1050px){
   .sidebar{transform:translateX(100%)}
   .sidebar.open{transform:translateX(0);box-shadow:-10px 0 40px rgba(0,0,0,.4)}
@@ -932,11 +949,109 @@ a{color:inherit;text-decoration:none}
   .main{padding:62px 12px 50px}
   .idea-grid{grid-template-columns:1fr}
   .tbl th:nth-child(2),.tbl td:nth-child(2){display:none}
+  .edit-grid{grid-template-columns:1fr}
 }
 </style>
 </head>
 <body>
 <div class="toast" id="toast"></div>
+
+<!-- ── QR MODAL ──────────────────────────────────────────── -->
+<div class="modal-backdrop" id="qr-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title"><i class="ti ti-qrcode"></i> کد QR</div>
+      <button class="modal-close" onclick="closeModal('qr-modal')"><i class="ti ti-x"></i></button>
+    </div>
+    <div class="modal-body">
+      <div class="qr-wrap">
+        <div class="qr-img"><img id="qr-img-el" src="" alt="QR"></div>
+        <div class="qr-link" id="qr-link-text"></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-p btn-sm" onclick="cpQrLink()"><i class="ti ti-copy"></i> کپی لینک</button>
+          <button class="btn btn-g btn-sm" onclick="window.open(document.getElementById('qr-img-el').src,'_blank')"><i class="ti ti-download"></i> دانلود QR</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── EDIT MODAL ─────────────────────────────────────────── -->
+<div class="modal-backdrop" id="edit-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title"><i class="ti ti-edit"></i> ویرایش کانفیگ</div>
+      <button class="modal-close" onclick="closeModal('edit-modal')"><i class="ti ti-x"></i></button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="edit-uuid">
+      <div class="edit-grid">
+        <div class="fg fg-full">
+          <label>عنوان لینک</label>
+          <input class="fi fi-full" id="edit-label" placeholder="مثلاً: کاربر علی">
+        </div>
+        <div class="fg">
+          <label>سهمیه ترافیک</label>
+          <input class="fi" id="edit-val" type="number" min="0" step="0.1" placeholder="0=بی‌نهایت">
+        </div>
+        <div class="fg">
+          <label>واحد</label>
+          <select class="fs" id="edit-unit">
+            <option value="GB">GB</option>
+            <option value="MB">MB</option>
+          </select>
+        </div>
+        <div class="fg">
+          <label>انقضا (روز از امروز)</label>
+          <input class="fi" id="edit-exp" type="number" min="0" step="1" placeholder="0=بی‌نهایت">
+        </div>
+        <div class="fg">
+          <label>وضعیت</label>
+          <select class="fs" id="edit-active">
+            <option value="1">فعال</option>
+            <option value="0">غیرفعال</option>
+          </select>
+        </div>
+        <div class="fg fg-full">
+          <label>یادداشت</label>
+          <input class="fi fi-full" id="edit-note" placeholder="اختیاری">
+        </div>
+        <div class="fg fg-full" style="flex-direction:row;align-items:center;justify-content:space-between;background:var(--amber-bg);border:1px solid rgba(245,158,11,.2);border-radius:9px;padding:10px 13px">
+          <span style="font-size:11.5px;color:var(--amber-t);display:flex;align-items:center;gap:6px"><i class="ti ti-rotate" style="font-size:14px"></i> ریست مصرف به صفر</span>
+          <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:11px;color:var(--t2)">
+            <input type="checkbox" id="edit-reset" style="width:16px;height:16px;cursor:pointer">
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-o" onclick="closeModal('edit-modal')"><i class="ti ti-x"></i> لغو</button>
+      <button class="btn btn-p" onclick="saveEdit()"><i class="ti ti-device-floppy"></i> ذخیره</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── DONATE MODAL ──────────────────────────────────────── -->
+<div class="modal-backdrop" id="donate-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title"><i class="ti ti-heart"></i> حمایت از پروژه</div>
+      <button class="modal-close" onclick="closeModal('donate-modal')"><i class="ti ti-x"></i></button>
+    </div>
+    <div class="modal-body">
+      <div class="donate-hero">
+        <span class="donate-emoji">💙</span>
+        <div class="donate-title">از codebox حمایت کنید</div>
+        <div class="donate-sub">این پروژه با عشق ساخته شده. اگه برات مفید بوده با یه دونیت کوچیک انرژی‌مون رو حفظ کن!</div>
+      </div>
+      <a href="https://wallets.arvin341az.workers.dev" target="_blank" rel="noopener" class="donate-btn" onclick="closeModal('donate-modal')">
+        <i class="ti ti-heart-filled"></i> دونیت کردن 💛
+      </a>
+      <button class="donate-skip" onclick="closeModal('donate-modal')">شاید بعداً</button>
+    </div>
+  </div>
+</div>
+
 <div class="mob-top">
   <div class="ml">
     <div class="mob-logo"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="cb"></div>
@@ -952,7 +1067,7 @@ a{color:inherit;text-decoration:none}
   <button class="sb-close" id="close-sb"><i class="ti ti-x"></i></button>
   <div class="logo">
     <div class="logo-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="cb"></div>
-    <div><div class="logo-name">codebox</div><div class="logo-sub">RVG Gateway · v8.1</div></div>
+    <div><div class="logo-name">codebox</div><div class="logo-sub">RVG Gateway · v8.2</div></div>
   </div>
   <div class="nav-wrap">
     <div class="nav-sec">پنل</div>
@@ -971,6 +1086,7 @@ a{color:inherit;text-decoration:none}
   <div class="sb-foot">
     <button class="theme-btn" onclick="toggleTheme()"><i class="ti ti-moon" id="theme-icon"></i> <span id="theme-label">تم روشن</span></button>
     <a class="tg-btn" href="https://t.me/CodeBoxo" target="_blank" rel="noopener"><i class="ti ti-brand-telegram"></i> @CodeBoxo</a>
+    <button class="donate-nav-btn" onclick="openModal('donate-modal')" style="display:flex;align-items:center;justify-content:center;gap:7px;background:rgba(245,158,11,.1);color:var(--amber-t);border-radius:9px;padding:8px;font-size:12px;font-weight:500;font-family:inherit;border:1px solid rgba(245,158,11,.2);cursor:pointer;width:100%;transition:.15s;margin-top:6px"><i class="ti ti-heart"></i> حمایت / دونیت</button>
     <button class="logout-btn" id="logout-btn"><i class="ti ti-logout"></i> خروج</button>
   </div>
 </aside>
@@ -1000,7 +1116,7 @@ a{color:inherit;text-decoration:none}
     <div class="vl-code" id="vless-main">در حال دریافت...</div>
     <div class="vl-actions">
       <button class="btn btn-p" onclick="cpText('vless-main')"><i class="ti ti-copy"></i> کپی</button>
-      <button class="btn btn-g" onclick="qrFor('vless-main')"><i class="ti ti-qrcode"></i> QR</button>
+      <button class="btn btn-g" onclick="openQr(document.getElementById('vless-main').textContent)"><i class="ti ti-qrcode"></i> QR</button>
       <button class="btn btn-o" onclick="navTo('links')"><i class="ti ti-link-plus"></i> لینک محدود</button>
       <button class="btn btn-o" onclick="navTo('subscriptions')"><i class="ti ti-rss"></i> سابسکریپشن</button>
     </div>
@@ -1028,7 +1144,7 @@ a{color:inherit;text-decoration:none}
     </div>
   </div>
   <div class="dash-footer">
-    <span class="df-text">codebox RVG Gateway v8.1 · Railway · 2025</span>
+    <span class="df-text">codebox RVG Gateway v8.2 · Railway · 2025</span>
     <a class="df-link" href="https://t.me/CodeBoxo" target="_blank"><i class="ti ti-brand-telegram"></i> t.me/CodeBoxo</a>
   </div>
 </section>
@@ -1116,14 +1232,14 @@ a{color:inherit;text-decoration:none}
     </div>
     <div class="card">
       <div class="card-title"><i class="ti ti-shield-check"></i> کنترل دسترسی</div>
-      <div class="sr"><span class="sr-k"><i class="ti ti-id-badge"></i> UUID Auth سخت‌گیرانه</span><span class="sr-v" style="color:var(--green-t)">● فعال v8.1</span></div>
+      <div class="sr"><span class="sr-k"><i class="ti ti-id-badge"></i> UUID Auth سخت‌گیرانه</span><span class="sr-v" style="color:var(--green-t)">● فعال v8.2</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-toggle-right"></i> فعال/غیرفعال لینک</span><span class="sr-v" style="color:var(--green-t)">● فعال</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-gauge"></i> سهمیه ترافیک</span><span class="sr-v" style="color:var(--green-t)">● فعال</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-calendar-x"></i> تاریخ انقضا</span><span class="sr-v" style="color:var(--green-t)">● فعال</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-ban"></i> قطع خودکار</span><span class="sr-v" style="color:var(--green-t)">● فعال</span></div>
     </div>
   </div>
-  <div class="cl"><i class="ti ti-info-circle"></i><span>در v8.1 هر UUID ناشناخته، حذف‌شده یا غیرفعال قبل از accept پروتکل VLESS رد می‌شود. اتصال بلافاصله با کد 1008 قطع می‌گردد.</span></div>
+  <div class="cl"><i class="ti ti-info-circle"></i><span>در v8.2 هر UUID ناشناخته، حذف‌شده یا غیرفعال قبل از accept پروتکل VLESS رد می‌شود. هر UUID فقط با کانفیگ خودش کار می‌کند و هیچ fallback به کانفیگ دیگری وجود ندارد.</span></div>
 </section>
 
 <!-- ERRORS -->
@@ -1136,10 +1252,10 @@ a{color:inherit;text-decoration:none}
 <section class="pg" id="pg-ideas">
   <div class="topbar"><div><div class="tb-title"><i class="ti ti-bulb"></i> ایده‌ها</div></div></div>
   <div class="idea-grid">
-    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-shield-check"></i></div><div class="idea-title">UUID Auth سخت‌گیرانه</div><div class="idea-desc">UUID ناشناخته، حذف‌شده یا غیرفعال قبل از هر پردازشی رد می‌شود.</div><span class="ibadge done">آماده v8.1</span></div>
+    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-shield-check"></i></div><div class="idea-title">UUID Auth سخت‌گیرانه</div><div class="idea-desc">هر UUID فقط با کانفیگ خودش کار می‌کند. UUID ناشناخته، حذف‌شده یا غیرفعال قبل از هر پردازشی رد می‌شود.</div><span class="ibadge done">آماده v8.2</span></div>
+    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-edit"></i></div><div class="idea-title">ویرایش کامل کانفیگ</div><div class="idea-desc">Modal ویرایش با همه فیلدها: عنوان، سهمیه، انقضا، یادداشت، وضعیت و ریست مصرف.</div><span class="ibadge done">آماده v8.2</span></div>
+    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-qrcode"></i></div><div class="idea-title">QR Code Modal</div><div class="idea-desc">QR code در modal داخلی نمایش داده می‌شود بدون باز شدن تب جدید.</div><span class="ibadge done">آماده v8.2</span></div>
     <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-device-floppy"></i></div><div class="idea-title">ذخیره دائمی JSON</div><div class="idea-desc">اطلاعات لینک‌ها و رمز عبور روی فایل ذخیره و با restart حفظ می‌شوند.</div><span class="ibadge done">آماده v8</span></div>
-    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-rocket"></i></div><div class="idea-title">Relay بهینه</div><div class="idea-desc">بافر 256KB، TCP_NODELAY، drain هوشمند و relay موازی برای حداکثر throughput.</div><span class="ibadge done">آماده v8.1</span></div>
-    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-sun"></i></div><div class="idea-title">تم روشن / تاریک</div><div class="idea-desc">سویچ بین دارک و لایت مود با ذخیره خودکار تنظیم.</div><span class="ibadge done">آماده v8</span></div>
     <div class="idea-card"><div class="idea-icon"><i class="ti ti-database"></i></div><div class="idea-title">Redis Persistence</div><div class="idea-desc">اتصال به Redis برای ذخیره‌سازی سریع‌تر و اشتراک state بین instance‌ها.</div><span class="ibadge plan">پیشنهادی</span></div>
     <div class="idea-card"><div class="idea-icon"><i class="ti ti-brand-telegram"></i></div><div class="idea-title">اعلان تلگرامی</div><div class="idea-desc">ارسال پیام هنگام رسیدن مصرف به ۸۰٪ و ۱۰۰٪ سهمیه از طریق Bot API.</div><span class="ibadge plan">پیشنهادی</span></div>
   </div>
@@ -1191,6 +1307,7 @@ a{color:inherit;text-decoration:none}
 
 </main>
 <script>
+// ── Theme ────────────────────────────────────────────────────────────────────
 let isDark=localStorage.getItem('rvg-theme')!=='light';
 function applyTheme(dark){
   document.documentElement.setAttribute('data-theme',dark?'dark':'light');
@@ -1203,12 +1320,14 @@ function applyTheme(dark){
 function toggleTheme(){isDark=!isDark;localStorage.setItem('rvg-theme',isDark?'dark':'light');applyTheme(isDark)}
 applyTheme(isDark);
 
+// ── Toast ────────────────────────────────────────────────────────────────────
 function toast(msg,type=''){
   const t=document.getElementById('toast');
   t.textContent=msg;t.className='toast show'+(type?' '+type:'');
   setTimeout(()=>t.classList.remove('show'),2400);
 }
-function fmt(n){return n>=1000?(n/1000).toFixed(1)+'k':n}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 function fmtB(b){if(!b||b===0)return '0 B';if(b<1024)return b+' B';if(b<1024**2)return (b/1024).toFixed(1)+' KB';if(b<1024**3)return (b/1024**2).toFixed(2)+' MB';return (b/1024**3).toFixed(2)+' GB'}
 function toFa(n){return n.toString().replace(/\d/g,d=>'۰۱۲۳۴۵۶۷۸۹'[d])}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -1222,6 +1341,72 @@ function expChip(exp,expired){
   return `<span class="exp-chip ec-ok"><i class="ti ti-calendar-check"></i> ${toFa(d)} روز</span>`;
 }
 
+// ── Modal System ─────────────────────────────────────────────────────────────
+function openModal(id){document.getElementById(id).classList.add('open')}
+function closeModal(id){document.getElementById(id).classList.remove('open')}
+document.querySelectorAll('.modal-backdrop').forEach(bd=>{
+  bd.addEventListener('click',e=>{if(e.target===bd)bd.classList.remove('open')});
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')document.querySelectorAll('.modal-backdrop.open').forEach(m=>m.classList.remove('open'))});
+
+// ── QR Modal ─────────────────────────────────────────────────────────────────
+let _qrCurrentLink='';
+function openQr(link){
+  _qrCurrentLink=link;
+  const url='https://api.qrserver.com/v1/create-qr-code/?size=280x280&data='+encodeURIComponent(link);
+  document.getElementById('qr-img-el').src=url;
+  document.getElementById('qr-link-text').textContent=link;
+  openModal('qr-modal');
+}
+function cpQrLink(){navigator.clipboard.writeText(_qrCurrentLink).then(()=>toast('لینک کپی شد','ok'))}
+
+// ── Edit Modal ────────────────────────────────────────────────────────────────
+function openEdit(link){
+  document.getElementById('edit-uuid').value=link.uuid;
+  document.getElementById('edit-label').value=link.label||'';
+  // Convert limit_bytes to GB for display
+  const lb=link.limit_bytes||0;
+  if(lb===0){document.getElementById('edit-val').value='';document.getElementById('edit-unit').value='GB';}
+  else if(lb%(1024**3)===0){document.getElementById('edit-val').value=lb/(1024**3);document.getElementById('edit-unit').value='GB';}
+  else{document.getElementById('edit-val').value=(lb/(1024**2)).toFixed(0);document.getElementById('edit-unit').value='MB';}
+  // Expires: show remaining days from now
+  if(link.expires_at){const d=daysLeft(link.expires_at);document.getElementById('edit-exp').value=d>0?d:0;}
+  else{document.getElementById('edit-exp').value='';}
+  document.getElementById('edit-active').value=link.active?'1':'0';
+  document.getElementById('edit-note').value=link.note||'';
+  document.getElementById('edit-reset').checked=false;
+  openModal('edit-modal');
+}
+async function saveEdit(){
+  const uid=document.getElementById('edit-uuid').value;
+  const label=document.getElementById('edit-label').value.trim();
+  const val=document.getElementById('edit-val').value;
+  const unit=document.getElementById('edit-unit').value;
+  const exp=document.getElementById('edit-exp').value;
+  const active=document.getElementById('edit-active').value==='1';
+  const note=document.getElementById('edit-note').value.trim();
+  const resetUsage=document.getElementById('edit-reset').checked;
+  if(!label){toast('عنوان نمی‌تواند خالی باشد','err');return}
+  try{
+    const body={label,active,note,limit_value:val||0,limit_unit:unit,expires_days:exp||0};
+    if(resetUsage)body.reset_usage=true;
+    const r=await authF('/api/links/'+uid,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok)throw new Error('failed');
+    toast('کانفیگ ذخیره شد','ok');
+    closeModal('edit-modal');
+    loadLinks();
+  }catch(e){toast('خطا در ذخیره','err')}
+}
+
+// ── Donate Modal (once per session) ─────────────────────────────────────────
+function maybeShowDonate(){
+  if(!sessionStorage.getItem('rvg_donate_shown')){
+    sessionStorage.setItem('rvg_donate_shown','1');
+    setTimeout(()=>openModal('donate-modal'),900);
+  }
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
 async function checkAuth(){try{const r=await fetch('/api/me');const d=await r.json();if(!d.authenticated)location.href='/login';}catch(e){location.href='/login'}}
 async function logout(){try{await fetch('/api/logout',{method:'POST'})}catch(e){}location.href='/login'}
 document.getElementById('logout-btn').addEventListener('click',logout);
@@ -1240,6 +1425,7 @@ async function changePw(){
   }catch(e){toast('✗ '+e.message,'err')}
 }
 
+// ── Sidebar ──────────────────────────────────────────────────────────────────
 const sb=document.getElementById('sb'),overlay=document.getElementById('overlay');
 function openSb(){sb.classList.add('open');overlay.classList.add('show')}
 function closeSb(){sb.classList.remove('open');overlay.classList.remove('show')}
@@ -1264,6 +1450,7 @@ async function authF(url,opts){
   return r;
 }
 
+// ── Stats ─────────────────────────────────────────────────────────────────────
 let prevTraf=0,ch1,ch2,ch3;
 async function fetchStats(){
   try{
@@ -1299,6 +1486,7 @@ function renderErrs(errs){
   el.innerHTML=errs.slice().reverse().map(e=>`<div class="erow"><div class="etime"><i class="ti ti-clock"></i>${new Date(e.time).toLocaleString('fa-IR')}</div><div class="emsg">${esc(e.error)}${e.url?' — '+esc(e.url):''}</div></div>`).join('');
 }
 
+// ── Links ─────────────────────────────────────────────────────────────────────
 async function loadLinks(){
   try{
     const r=await authF('/api/links'),d=await r.json();
@@ -1309,6 +1497,8 @@ async function loadLinks(){
     const tb=document.getElementById('links-tb'),empty=document.getElementById('links-empty');
     if(!links.length){tb.innerHTML='';empty.style.display='block';document.getElementById('lsummary').innerHTML='<div class="empty"><i class="ti ti-link-off"></i><p>لینکی وجود ندارد</p></div>';return}
     empty.style.display='none';
+    // store links globally for edit modal
+    window._linksCache=links;
     tb.innerHTML=links.map(l=>{
       const lim=l.limit_bytes===0?'∞':fmtB(l.limit_bytes),pct=l.limit_bytes===0?0:Math.min(100,l.used_bytes/l.limit_bytes*100),bc=pct>90?'var(--red)':pct>70?'var(--amber)':'var(--accent)',allowed=l.active&&!l.expired;
       return `<tr>
@@ -1320,7 +1510,8 @@ async function loadLinks(){
         <td><div style="display:flex;gap:4px;flex-wrap:nowrap">
           <button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.vless_link)}').then(()=>toast('لینک VLESS کپی شد','ok'))" title="کپی لینک"><i class="ti ti-copy"></i></button>
           <button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.sub_url)}').then(()=>toast('لینک سابسکریپشن کپی شد','ok'))" title="کپی Sub URL"><i class="ti ti-rss"></i></button>
-          <button class="btn btn-sm btn-g" onclick="window.open('https://api.qrserver.com/v1/create-qr-code/?size=280x280&data='+encodeURIComponent('${esc(l.vless_link)}'),'_blank')" title="QR"><i class="ti ti-qrcode"></i></button>
+          <button class="btn btn-sm btn-g" onclick="openQr('${esc(l.vless_link)}')" title="QR Code"><i class="ti ti-qrcode"></i></button>
+          <button class="btn btn-sm btn-amber" onclick="openEditByUuid('${l.uuid}')" title="ویرایش"><i class="ti ti-edit"></i></button>
           <button class="btn btn-sm btn-g" onclick="resetUsage('${l.uuid}')" title="ریست مصرف"><i class="ti ti-rotate"></i></button>
           <button class="btn btn-sm btn-d" onclick="deleteLink('${l.uuid}')" title="حذف"><i class="ti ti-trash"></i></button>
         </div></td>
@@ -1328,6 +1519,11 @@ async function loadLinks(){
     }).join('');
     document.getElementById('lsummary').innerHTML=links.slice(0,6).map(l=>`<div class="sr"><span class="sr-k" style="gap:5px"><i class="ti ${l.expired?'ti-calendar-x':l.active?'ti-circle-check':'ti-circle-x'}" style="color:${l.expired?'var(--amber)':l.active?'var(--green)':'var(--red)'}"></i>${esc(l.label)}</span><span class="sr-v" style="font-size:10px">${fmtB(l.used_bytes)} / ${l.limit_bytes===0?'∞':fmtB(l.limit_bytes)}</span></div>`).join('');
   }catch(e){console.error(e)}
+}
+
+function openEditByUuid(uuid){
+  const link=(window._linksCache||[]).find(l=>l.uuid===uuid);
+  if(link)openEdit(link);
 }
 
 async function createLink(){
@@ -1351,6 +1547,7 @@ async function deleteLink(uuid){
   try{const r=await authF('/api/links/'+uuid,{method:'DELETE'});if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||'failed')}toast('لینک حذف شد','ok');loadLinks();}catch(e){toast('خطا در حذف: '+e.message,'err')}
 }
 
+// ── Subscriptions ─────────────────────────────────────────────────────────────
 async function loadSubs(){
   document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'/sub-all';
   try{
@@ -1358,7 +1555,7 @@ async function loadSubs(){
     const links=(d.links||[]).filter(l=>l.active&&!l.expired);
     const el=document.getElementById('sub-list');
     if(!links.length){el.innerHTML='<div class="empty"><i class="ti ti-rss-off"></i><p>هیچ لینک فعالی نیست</p></div>';return}
-    el.innerHTML=links.map(l=>`<div style="padding:12px 14px;background:var(--accent-d);border:1px solid var(--card-b);border-radius:9px;margin-bottom:7px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><div style="font-weight:600;font-size:12px;margin-bottom:3px">${esc(l.label)}</div><div class="sub-url">${esc(l.sub_url)}</div></div><div style="display:flex;gap:5px"><button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.sub_url)}').then(()=>toast('کپی شد','ok'))"><i class="ti ti-copy"></i> کپی</button><button class="btn btn-sm btn-g" onclick="window.open('https://api.qrserver.com/v1/create-qr-code/?size=260x260&data='+encodeURIComponent('${esc(l.sub_url)}'),'_blank')"><i class="ti ti-qrcode"></i></button></div></div>`).join('');
+    el.innerHTML=links.map(l=>`<div style="padding:12px 14px;background:var(--accent-d);border:1px solid var(--card-b);border-radius:9px;margin-bottom:7px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><div style="font-weight:600;font-size:12px;margin-bottom:3px">${esc(l.label)}</div><div class="sub-url">${esc(l.sub_url)}</div></div><div style="display:flex;gap:5px"><button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.sub_url)}').then(()=>toast('کپی شد','ok'))"><i class="ti ti-copy"></i> کپی</button><button class="btn btn-sm btn-g" onclick="openQr('${esc(l.sub_url)}')"><i class="ti ti-qrcode"></i></button></div></div>`).join('');
   }catch(e){}
 }
 function cpSubAll(){navigator.clipboard.writeText(location.protocol+'//'+location.host+'/sub-all').then(()=>toast('آدرس سابسکریپشن کپی شد','ok'))}
@@ -1372,15 +1569,16 @@ async function fetchDefaultVless(){
   try{const r=await authF('/api/links'),d=await r.json();const links=d.links||[];const def=links.find(l=>l.limit_bytes===0&&l.active&&!l.expired)||links.find(l=>l.active&&!l.expired)||links[0];document.getElementById('vless-main').textContent=def?def.vless_link:'هنوز لینکی وجود ندارد — یک لینک بسازید';}catch(e){}
 }
 function cpText(id){navigator.clipboard.writeText(document.getElementById(id).textContent).then(()=>toast('کپی شد','ok'))}
-function qrFor(id){const t=document.getElementById(id).textContent;window.open('https://api.qrserver.com/v1/create-qr-code/?size=280x280&data='+encodeURIComponent(t),'_blank')}
 function refreshAll(){fetchStats();fetchDefaultVless();loadLinks();toast('در حال رفرش...','');if(document.getElementById('pg-subscriptions').classList.contains('on'))loadSubs()}
 
+// ── WebSocket Test ────────────────────────────────────────────────────────────
 let ws;
 function wsLog(c,m){const l=document.getElementById('ws-log'),p=document.createElement('p');const colors={ok:'#34D399',err:'#F87171',info:'#7BAED4',sent:'#FCD34D'};p.style.color=colors[c]||'#fff';p.textContent='['+new Date().toLocaleTimeString('fa-IR')+'] '+m;l.appendChild(p);l.scrollTop=l.scrollHeight}
 function wsConn(){const u=document.getElementById('ws-uuid').value.trim();if(!u){toast('UUID یک لینک فعال را وارد کنید','err');return}const url=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws/'+u;wsLog('info','اتصال: '+url);ws=new WebSocket(url);ws.onopen=()=>wsLog('ok','✓ متصل - UUID معتبر است');ws.onerror=()=>wsLog('err','✗ خطا - احتمالاً UUID نامعتبر یا غیرفعال');ws.onmessage=m=>wsLog('info','دریافت '+(m.data.size||m.data.length)+' byte');ws.onclose=e=>wsLog('err','قطع ('+e.code+')'+(e.code===1008?' - دسترسی رد شد':''))}
 function wsSend(){const m=document.getElementById('ws-msg').value;if(!m||!ws||ws.readyState!==1)return;ws.send(m);wsLog('sent','ارسال: '+m);document.getElementById('ws-msg').value=''}
 function wsDisc(){if(ws)ws.close()}
 
+// ── Charts ────────────────────────────────────────────────────────────────────
 function initCharts(){
   const opts={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{backgroundColor:'rgba(13,27,46,.95)',borderColor:'rgba(59,130,246,.2)',borderWidth:1,titleColor:'#E8F4FF',bodyColor:'#7BAED4',callbacks:{label:v=>`${v.parsed.y.toFixed(2)} MB`}}},scales:{x:{grid:{color:'rgba(59,130,246,.04)'},ticks:{color:'#3D6B8E',font:{size:9}}},y:{grid:{color:'rgba(59,130,246,.04)'},ticks:{color:'#3D6B8E',font:{size:9},callback:v=>v+'MB'}}}};
   const ds={label:'MB',data:[],borderColor:'rgba(59,130,246,.8)',backgroundColor:'rgba(59,130,246,.05)',fill:true,tension:.45,pointRadius:3,pointHoverRadius:5,borderWidth:2};
@@ -1389,12 +1587,14 @@ function initCharts(){
   ch2=new Chart(document.getElementById('ch2'),{type:'doughnut',data:{labels:['VLESS/WS','HTTP Proxy','سایر'],datasets:[{data:[70,25,5],backgroundColor:['rgba(59,130,246,.8)','rgba(16,185,129,.7)','rgba(139,92,246,.7)'],borderColor:'rgba(0,0,0,0)',borderWidth:3,hoverOffset:8}]},options:{responsive:true,maintainAspectRatio:false,cutout:'68%',plugins:{legend:{position:'bottom',labels:{color:'var(--t2)',font:{size:9},padding:10,usePointStyle:true}}}}});
 }
 
+// ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',async()=>{
   await checkAuth();
   initCharts();
   document.getElementById('set-host').textContent=location.host;
   document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'/sub-all');
   fetchStats();fetchDefaultVless();loadLinks();
+  maybeShowDonate();
   setInterval(fetchStats,4000);
   setInterval(()=>{
     if(document.getElementById('pg-links').classList.contains('on'))loadLinks();
