@@ -1070,7 +1070,7 @@ a{color:inherit;text-decoration:none}
   </div>
 </section>
 
-<!-- LINKS -->
+<!-- LINKS (ستون آنلاین اضافه شده) -->
 <section class="pg" id="pg-links">
   <div class="topbar">
     <div><div class="tb-title"><i class="ti ti-link-plus"></i> مدیریت لینک‌ها</div><div class="tb-sub">ساخت و مدیریت کانفیگ با سهمیه و تاریخ انقضا</div></div>
@@ -1092,7 +1092,7 @@ a{color:inherit;text-decoration:none}
     <div class="card-title"><i class="ti ti-list"></i> لینک‌ها</div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>عنوان / یادداشت</th><th>UUID</th><th>مصرف / سهمیه</th><th>انقضا</th><th>وضعیت</th><th>عملیات</th></tr></thead>
+        <thead><tr><th>عنوان / یادداشت</th><th>UUID</th><th>مصرف / سهمیه</th><th>انقضا</th><th>آنلاین</th><th>وضعیت</th><th>عملیات</th></tr></thead>
         <tbody id="links-tb"></tbody>
       </table>
     </div>
@@ -1133,7 +1133,7 @@ a{color:inherit;text-decoration:none}
   <div class="card"><div class="card-title"><i class="ti ti-chart-area"></i> نمودار ترافیک ساعتی</div><div class="ch-lg"><canvas id="ch3"></canvas></div></div>
 </section>
 
-<!-- CONNECTIONS (نمایش کاربران آنلاین، بدون جزئیات کانکشن‌ها) -->
+<!-- CONNECTIONS -->
 <section class="pg" id="pg-connections">
   <div class="topbar">
     <div><div class="tb-title"><i class="ti ti-plug-connected"></i> اتصالات</div><div class="tb-sub">کاربران آنلاین</div></div>
@@ -1317,6 +1317,19 @@ async function authF(url,opts){
 }
 
 let prevTraf=0,ch1,ch2,ch3;
+// نگهداری UUIDهای آنلاین برای نمایش در جدول لینک‌ها
+let onlineUuids = new Set();
+
+// دریافت وضعیت آنلاین و به‌روزرسانی نشان‌گرها
+async function updateOnlineStatus(){
+  try {
+    const r = await authF('/api/connections');
+    const d = await r.json();
+    onlineUuids = new Set((d.users || []).map(u => u.uuid));
+    document.getElementById('conns-nb').textContent = onlineUuids.size;
+  } catch(e) { console.error(e); }
+}
+
 async function fetchStats(){
   try{
     const r=await authF('/stats'),d=await r.json();
@@ -1362,11 +1375,13 @@ async function loadLinks(){
     empty.style.display='none';
     tb.innerHTML=links.map(l=>{
       const lim=l.limit_bytes===0?'∞':fmtB(l.limit_bytes),pct=l.limit_bytes===0?0:Math.min(100,l.used_bytes/l.limit_bytes*100),bc=pct>90?'var(--red)':pct>70?'var(--amber)':'var(--accent)',allowed=l.active&&!l.expired;
+      const onlineDot = onlineUuids.has(l.uuid) ? '<span class="dot dg pulse"></span>' : '<span style="opacity:0.3">—</span>';
       return `<tr>
         <td><div class="ll">${esc(l.label)}</div><div class="lm"><span>${new Date(l.created_at).toLocaleDateString('fa-IR')}</span>${l.note?`<span title="${esc(l.note)}"><i class="ti ti-note"></i>${esc(l.note.slice(0,25))}${l.note.length>25?'...':''}</span>`:''}</div></td>
         <td><span class="uuid-chip" onclick="navigator.clipboard.writeText('${l.uuid}').then(()=>toast('UUID کپی شد','ok'))" title="کلیک برای کپی">${l.uuid.slice(0,13)}…</span></td>
         <td><div style="width:120px"><div class="ubar"><div class="ubar-f" style="width:${pct}%;background:${bc}"></div></div><div class="utxt">${fmtB(l.used_bytes)} / ${lim}</div></div></td>
         <td>${expChip(l.expires_at,l.expired)}</td>
+        <td>${onlineDot}</td>
         <td><button class="tog${allowed?' on':''}" onclick="toggleActive('${l.uuid}',${!l.active})" title="${l.active?'غیرفعال کن':'فعال کن'}"></button></td>
         <td><div style="display:flex;gap:4px;flex-wrap:nowrap">
           <button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.vless_link)}').then(()=>toast('لینک VLESS کپی شد','ok'))" title="کپی لینک"><i class="ti ti-copy"></i></button>
@@ -1414,7 +1429,6 @@ async function loadSubs(){
 }
 function cpSubAll(){navigator.clipboard.writeText(location.protocol+'//'+location.host+'/sub-all').then(()=>toast('آدرس سابسکریپشن کپی شد','ok'))}
 
-// بارگذاری لیست کاربران آنلاین (بدون نمایش کانکشن‌های تکراری)
 async function loadConns(){
   try {
     const r = await authF('/api/connections');
@@ -1468,9 +1482,12 @@ document.addEventListener('DOMContentLoaded',async()=>{
   initCharts();
   document.getElementById('set-host').textContent=location.host;
   document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'/sub-all');
+  // اولین به‌روزرسانی وضعیت آنلاین
+  updateOnlineStatus();
   fetchStats();fetchDefaultVless();loadLinks();
   setInterval(fetchStats,4000);
   setInterval(()=>{
+    updateOnlineStatus(); // همیشه آنلاین بودن کاربران را به‌روز کن
     if(document.getElementById('pg-links').classList.contains('on'))loadLinks();
     if(document.getElementById('pg-subscriptions').classList.contains('on'))loadSubs();
     if(document.getElementById('pg-connections').classList.contains('on'))loadConns();
