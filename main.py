@@ -1099,7 +1099,7 @@ a{color:inherit;text-decoration:none}
     <div class="card-title"><i class="ti ti-list"></i> لینک‌ها</div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>عنوان / یادداشت</th><th>وضعیت اتصال</th><th>UUID</th><th>مصرف / سهمیه</th><th>انقضا</th><th>وضعیت</th><th>عملیات</th></tr></thead>
+        <thead><tr><th>عنوان / یادداشت</th><th style="text-align:center">وضعیت اتصال</th><th>UUID</th><th>مصرف / سهمیه</th><th>انقضا</th><th>وضعیت</th><th>عملیات</th></tr></thead>
         <tbody id="links-tb"></tbody>
       </table>
     </div>
@@ -1383,7 +1383,7 @@ async function loadLinks(){
       const onlineStatusHtml = onlineUuids.has(l.uuid) ? '<span class="online-dot"></span>' : '';
       return `<tr>
         <td><div class="ll">${esc(l.label)}</div><div class="lm"><span>${new Date(l.created_at).toLocaleDateString('fa-IR')}</span>${l.note?`<span title="${esc(l.note)}"><i class="ti ti-note"></i>${esc(l.note.slice(0,25))}${l.note.length>25?'...':''}</span>`:''}</div></td>
-        <td>${onlineStatusHtml}</td>
+        <td style="text-align:center">${onlineStatusHtml}</td>
         <td><span class="uuid-chip" onclick="navigator.clipboard.writeText('${l.uuid}').then(()=>toast('UUID کپی شد','ok'))" title="کلیک برای کپی">${l.uuid.slice(0,13)}…</span></td>
         <td><div style="width:120px"><div class="ubar"><div class="ubar-f" style="width:${pct}%;background:${bc}"></div></div><div class="utxt">${fmtB(l.used_bytes)} / ${lim}</div></div></td>
         <td>${expChip(l.expires_at,l.expired)}</td>
