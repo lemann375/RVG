@@ -168,9 +168,7 @@ def generate_vless_link(uuid: str, host: str, remark: str = "") -> str:
     query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
     return f"vless://{uuid}@{host}:443?{query}#{quote(remark)}"
 
-# NEW: فرمت‌دهی مصرف برای نمایش در remark
 def format_bytes(size: int, decimal_places: int = 1) -> str:
-    """تبدیل بایت به رشته خوانا (KB, MB, GB)"""
     if size < 1024:
         return f"{size} B"
     elif size < 1024**2:
@@ -258,7 +256,6 @@ async def subscription_single(uuid: str):
         raise HTTPException(status_code=404, detail="not found or inactive")
     host = get_host()
 
-    # NEW: ساخت remark شامل مصرف
     used_str = format_bytes(link["used_bytes"])
     limit_str = format_bytes(link["limit_bytes"]) if link["limit_bytes"] > 0 else "∞"
     remark = f"{link['label']} ({used_str}/{limit_str})"
@@ -377,7 +374,7 @@ async def create_link(request: Request, _=Depends(require_auth)):
         "uuid": uid,
         **LINKS[uid],
         "expired": False,
-        "vless_link": generate_vless_link(uid, host, remark=label),  # لینک خام بدون مصرف
+        "vless_link": generate_vless_link(uid, host, remark=label),
         "sub_url": f"https://{host}/sub/{uid}",
     }
 
@@ -388,11 +385,12 @@ async def list_links(_=Depends(require_auth)):
         snap = dict(LINKS)
     result = []
     for uid, d in snap.items():
+        # ⚠️ اصلاح: حذف پیشوند "RVG-" از remark
         result.append({
             "uuid": uid,
             **d,
             "expired": is_link_expired(d),
-            "vless_link": generate_vless_link(uid, host, remark=f"RVG-{d['label']}"),
+            "vless_link": generate_vless_link(uid, host, remark=d['label']),  # قبلاً f"RVG-{d['label']}"
             "sub_url": f"https://{host}/sub/{uid}",
         })
     result.sort(key=lambda x: x["created_at"], reverse=True)
