@@ -168,6 +168,18 @@ def generate_vless_link(uuid: str, host: str, remark: str = "") -> str:
     query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
     return f"vless://{uuid}@{host}:443?{query}#{quote(remark)}"
 
+# NEW: فرمت‌دهی مصرف برای نمایش در remark
+def format_bytes(size: int, decimal_places: int = 1) -> str:
+    """تبدیل بایت به رشته خوانا (KB, MB, GB)"""
+    if size < 1024:
+        return f"{size} B"
+    elif size < 1024**2:
+        return f"{size/1024:.{decimal_places}f} KB"
+    elif size < 1024**3:
+        return f"{size/1024**2:.{decimal_places}f} MB"
+    else:
+        return f"{size/1024**3:.{decimal_places}f} GB"
+
 def uptime() -> str:
     secs = int(time.time() - stats["start_time"])
     h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
@@ -190,12 +202,8 @@ def is_link_expired(link: dict) -> bool:
         return False
 
 def is_link_allowed(link: dict | None) -> bool:
-    """
-    ✅ FIX: اگه link وجود نداشته باشه → رد کن (قبلاً True برمیگشت!)
-    True فقط اگه لینک موجود، فعال، منقضی‌نشده و در سهمیه باشه
-    """
     if link is None:
-        return False  # ← FIX: UUID ناشناس رد میشه
+        return False
     if not link.get("active", True):
         return False
     if is_link_expired(link):
@@ -242,27 +250,44 @@ async def health():
 # ── Subscription ──────────────────────────────────────────────────────────────
 @app.get("/sub/{uuid}")
 async def subscription_single(uuid: str):
+    """سابسکریپشن تکی با نمایش مصرف فعلی در remark"""
     import base64
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
     if not link or not is_link_allowed(link):
         raise HTTPException(status_code=404, detail="not found or inactive")
     host = get_host()
-    vless = generate_vless_link(uuid, host, remark=f"{link['label']}")
+
+    # NEW: ساخت remark شامل مصرف
+    used_str = format_bytes(link["used_bytes"])
+    limit_str = format_bytes(link["limit_bytes"]) if link["limit_bytes"] > 0 else "∞"
+    remark = f"{link['label']} ({used_str}/{limit_str})"
+
+    vless = generate_vless_link(uuid, host, remark=remark)
     content = base64.b64encode(vless.encode()).decode()
-    return Response(content=content, media_type="text/plain",
-                    headers={"profile-title": link["label"], "support-url": "https://t.me/CodeBoxo"})
+    return Response(
+        content=content,
+        media_type="text/plain",
+        headers={
+            "profile-title": remark,
+            "support-url": "https://t.me/CodeBoxo"
+        }
+    )
 
 @app.get("/sub-all")
 async def subscription_all(_=Depends(require_auth)):
+    """سابسکریپشن کامل (فقط ادمین) همراه با مصرف هر لینک"""
     import base64
     host = get_host()
     async with LINKS_LOCK:
-        lines = [
-            generate_vless_link(uid, host, remark=f"{d['label']}")
-            for uid, d in LINKS.items()
-            if is_link_allowed(d)
-        ]
+        lines = []
+        for uid, d in LINKS.items():
+            if not is_link_allowed(d):
+                continue
+            used_str = format_bytes(d["used_bytes"])
+            limit_str = format_bytes(d["limit_bytes"]) if d["limit_bytes"] > 0 else "∞"
+            remark = f"{d['label']} ({used_str}/{limit_str})"
+            lines.append(generate_vless_link(uid, host, remark=remark))
     content = base64.b64encode("\n".join(lines).encode()).decode()
     return Response(content=content, media_type="text/plain")
 
@@ -352,7 +377,7 @@ async def create_link(request: Request, _=Depends(require_auth)):
         "uuid": uid,
         **LINKS[uid],
         "expired": False,
-        "vless_link": generate_vless_link(uid, host, remark=f"{label}"),
+        "vless_link": generate_vless_link(uid, host, remark=label),  # لینک خام بدون مصرف
         "sub_url": f"https://{host}/sub/{uid}",
     }
 
@@ -411,14 +436,13 @@ async def delete_link(uid: str, _=Depends(require_auth)):
 # VLESS Relay — بهینه‌شده برای حداکثر throughput
 # ══════════════════════════════════════════════════════════════════════════════
 
-# بافر 256KB برای throughput بالاتر
 RELAY_BUF = 256 * 1024
 
 async def parse_vless_header(chunk: bytes):
     if len(chunk) < 24:
         raise ValueError("chunk too small")
-    pos = 1  # skip version
-    pos += 16  # skip uuid bytes
+    pos = 1
+    pos += 16
     addon_len = chunk[pos]; pos += 1 + addon_len
     command = chunk[pos]; pos += 1
     port = int.from_bytes(chunk[pos:pos+2], "big"); pos += 2
@@ -436,13 +460,8 @@ async def parse_vless_header(chunk: bytes):
     return command, address, port, chunk[pos:]
 
 async def check_and_use(uid: str, n: int) -> bool:
-    """
-    ✅ FIX: UUID ناشناس → رد کن (قبلاً True برمیگشت!)
-    چک کوتا + فعال/منقضی بودن لینک
-    """
     async with LINKS_LOCK:
         link = LINKS.get(uid)
-        # ← FIX: اگه لینک وجود نداشته باشه رد کن
         if link is None:
             return False
         if not is_link_allowed(link):
@@ -452,10 +471,7 @@ async def check_and_use(uid: str, n: int) -> bool:
         hourly_traffic[datetime.now().strftime("%H:00")] += n
     return True
 
-# ── Relay بهینه: بدون await drain در هر بسته ────────────────────────────────
-
 async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str):
-    """WebSocket → TCP با بافر جمع‌شده برای کاهش سربار"""
     try:
         while True:
             msg = await ws.receive()
@@ -464,14 +480,12 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
             data = msg.get("bytes") or (msg.get("text") or "").encode()
             if not data:
                 continue
-            # ✅ FIX: چک میکنه لینک هنوز فعاله
             if not await check_and_use(uid, len(data)):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
             stats["total_requests"] += 1
             connections[conn_id]["bytes"] += len(data)
             writer.write(data)
-            # drain فقط وقتی بافر پر باشه → کمتر سربار
             if writer.transport.get_write_buffer_size() > RELAY_BUF:
                 await writer.drain()
     except (WebSocketDisconnect, Exception):
@@ -483,20 +497,16 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
             pass
 
 async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: str, uid: str):
-    """TCP → WebSocket با خواندن greedy برای throughput بالاتر"""
     first = True
     try:
         while True:
-            # readany → بلافاصله هر داده‌ای که آماده‌ست برمیگردونه
             data = await reader.read(RELAY_BUF)
             if not data:
                 break
-            # ✅ FIX: چک میکنه لینک هنوز فعاله
             if not await check_and_use(uid, len(data)):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
             connections[conn_id]["bytes"] += len(data)
-            # هدر VLESS response فقط برای اولین پکت
             payload = (b"\x00\x00" + data) if first else data
             first = False
             await ws.send_bytes(payload)
@@ -507,12 +517,10 @@ async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: 
 async def websocket_tunnel(ws: WebSocket, uuid: str):
     await ws.accept()
 
-    # ✅ FIX: اول چک کن UUID در لینک‌ها هست و مجاز است
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
 
     if not is_link_allowed(link):
-        # UUID ناشناس، حذف‌شده، غیرفعال، منقضی یا تموم‌شده سهمیه
         logger.warning(f"🚫 WS rejected uuid={uuid[:8]}… (not allowed)")
         await ws.close(code=1008, reason="not authorized")
         return
@@ -532,7 +540,6 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
 
         command, address, port, payload = await parse_vless_header(first_chunk)
 
-        # ✅ چک مجدد بعد از دریافت هدر (ممکنه بین accept و اینجا تغییر کرده باشه)
         if not await check_and_use(uuid, len(first_chunk)):
             await ws.close(code=1008, reason="quota/disabled")
             return
@@ -541,12 +548,10 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
         connections[conn_id]["bytes"] += len(first_chunk)
         logger.info(f"➡️  [{conn_id}] → {address}:{port}")
 
-        # TCP با TCP_NODELAY برای کاهش تأخیر
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(address, port),
             timeout=10.0
         )
-        # فعال‌سازی TCP_NODELAY → کاهش latency
         sock = writer.transport.get_extra_info('socket')
         if sock:
             import socket
@@ -556,7 +561,6 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
             writer.write(payload)
             await writer.drain()
 
-        # هر دو relay موازی، اولی که تموم شد بقیه هم cancel
         done, pending = await asyncio.wait(
             {
                 asyncio.create_task(relay_ws_to_tcp(ws, writer, conn_id, uuid)),
