@@ -840,7 +840,7 @@ a{color:inherit;text-decoration:none}
 .dg{background:var(--green)}.dr{background:var(--red)}.da{background:var(--amber)}.db{background:var(--accent)}
 .pulse{animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-.online-dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--green);margin-left:8px;}
+.online-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-left:8px;}
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-bottom:18px}
 .metric{background:var(--card);border:1px solid var(--card-b);border-radius:var(--radius);padding:17px 17px 14px;transition:all .2s;position:relative;overflow:hidden;cursor:default}
 .metric::after{content:'';position:absolute;top:0;right:0;width:3px;height:100%;background:var(--accent);opacity:0;transition:.2s}
