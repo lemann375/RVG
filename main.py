@@ -840,7 +840,7 @@ a{color:inherit;text-decoration:none}
 .dg{background:var(--green)}.dr{background:var(--red)}.da{background:var(--amber)}.db{background:var(--accent)}
 .pulse{animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-.online-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:8px;}
+.online-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin:0 auto;}
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-bottom:18px}
 .metric{background:var(--card);border:1px solid var(--card-b);border-radius:var(--radius);padding:17px 17px 14px;transition:all .2s;position:relative;overflow:hidden;cursor:default}
 .metric::after{content:'';position:absolute;top:0;right:0;width:3px;height:100%;background:var(--accent);opacity:0;transition:.2s}
@@ -1069,7 +1069,7 @@ a{color:inherit;text-decoration:none}
   </div>
 </section>
 
-<!-- LINKS (نشان‌گر آنلاین در سمت چپ نام کاربر) -->
+<!-- LINKS: ستون جدید "وضعیت اتصال" اضافه شد -->
 <section class="pg" id="pg-links">
   <div class="topbar">
     <div><div class="tb-title"><i class="ti ti-link-plus"></i> مدیریت لینک‌ها</div><div class="tb-sub">ساخت و مدیریت کانفیگ با سهمیه و تاریخ انقضا</div></div>
@@ -1091,7 +1091,7 @@ a{color:inherit;text-decoration:none}
     <div class="card-title"><i class="ti ti-list"></i> لینک‌ها</div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>عنوان / یادداشت</th><th>UUID</th><th>مصرف / سهمیه</th><th>انقضا</th><th>وضعیت</th><th>عملیات</th></tr></thead>
+        <thead><tr><th>عنوان / یادداشت</th><th>وضعیت اتصال</th><th>UUID</th><th>مصرف / سهمیه</th><th>انقضا</th><th>وضعیت</th><th>عملیات</th></tr></thead>
         <tbody id="links-tb"></tbody>
       </table>
     </div>
@@ -1372,9 +1372,10 @@ async function loadLinks(){
     empty.style.display='none';
     tb.innerHTML=links.map(l=>{
       const lim=l.limit_bytes===0?'∞':fmtB(l.limit_bytes),pct=l.limit_bytes===0?0:Math.min(100,l.used_bytes/l.limit_bytes*100),bc=pct>90?'var(--red)':pct>70?'var(--amber)':'var(--accent)',allowed=l.active&&!l.expired;
-      const onlineDot = onlineUuids.has(l.uuid) ? '<span class="online-dot"></span>' : '';
+      const onlineStatusHtml = onlineUuids.has(l.uuid) ? '<span class="online-dot"></span>' : '';
       return `<tr>
-        <td><div class="ll">${esc(l.label)}${onlineDot}</div><div class="lm"><span>${new Date(l.created_at).toLocaleDateString('fa-IR')}</span>${l.note?`<span title="${esc(l.note)}"><i class="ti ti-note"></i>${esc(l.note.slice(0,25))}${l.note.length>25?'...':''}</span>`:''}</div></td>
+        <td><div class="ll">${esc(l.label)}</div><div class="lm"><span>${new Date(l.created_at).toLocaleDateString('fa-IR')}</span>${l.note?`<span title="${esc(l.note)}"><i class="ti ti-note"></i>${esc(l.note.slice(0,25))}${l.note.length>25?'...':''}</span>`:''}</div></td>
+        <td>${onlineStatusHtml}</td>
         <td><span class="uuid-chip" onclick="navigator.clipboard.writeText('${l.uuid}').then(()=>toast('UUID کپی شد','ok'))" title="کلیک برای کپی">${l.uuid.slice(0,13)}…</span></td>
         <td><div style="width:120px"><div class="ubar"><div class="ubar-f" style="width:${pct}%;background:${bc}"></div></div><div class="utxt">${fmtB(l.used_bytes)} / ${lim}</div></div></td>
         <td>${expChip(l.expires_at,l.expired)}</td>
@@ -1477,7 +1478,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   await checkAuth();
   initCharts();
   document.getElementById('set-host').textContent=location.host;
-  document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'/sub-all');
+  document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'//'+location.host+'/sub-all');
   updateOnlineStatus();
   fetchStats();fetchDefaultVless();loadLinks();
   setInterval(fetchStats,4000);
