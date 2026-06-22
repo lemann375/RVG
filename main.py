@@ -246,6 +246,13 @@ async def health():
     return {"status": "ok", "connections": len(connections), "uptime": uptime()}
 
 # ── Subscription ──────────────────────────────────────────────────────────────
+# هدرهای جلوگیری از کش برای بروزرسانی مصرف در کلاینت‌های v2ray
+NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
 @app.get("/sub/{uuid}")
 async def subscription_single(uuid: str):
     """سابسکریپشن تکی با نمایش مصرف فعلی در remark"""
@@ -262,14 +269,12 @@ async def subscription_single(uuid: str):
 
     vless = generate_vless_link(uuid, host, remark=remark)
     content = base64.b64encode(vless.encode()).decode()
-    return Response(
-        content=content,
-        media_type="text/plain",
-        headers={
-            "profile-title": remark,
-            "support-url": "https://t.me/CodeBoxo"
-        }
-    )
+    headers = {
+        **NO_CACHE_HEADERS,
+        "profile-title": remark,
+        "support-url": "https://t.me/CodeBoxo"
+    }
+    return Response(content=content, media_type="text/plain", headers=headers)
 
 @app.get("/sub-all")
 async def subscription_all(_=Depends(require_auth)):
@@ -286,7 +291,12 @@ async def subscription_all(_=Depends(require_auth)):
             remark = f"{d['label']} ({used_str}/{limit_str})"
             lines.append(generate_vless_link(uid, host, remark=remark))
     content = base64.b64encode("\n".join(lines).encode()).decode()
-    return Response(content=content, media_type="text/plain")
+    headers = {
+        **NO_CACHE_HEADERS,
+        "profile-title": "RVG All Configs",
+        "support-url": "https://t.me/CodeBoxo"
+    }
+    return Response(content=content, media_type="text/plain", headers=headers)
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────
 @app.post("/api/login")
@@ -385,12 +395,11 @@ async def list_links(_=Depends(require_auth)):
         snap = dict(LINKS)
     result = []
     for uid, d in snap.items():
-        # ⚠️ اصلاح: حذف پیشوند "RVG-" از remark
         result.append({
             "uuid": uid,
             **d,
             "expired": is_link_expired(d),
-            "vless_link": generate_vless_link(uid, host, remark=d['label']),  # قبلاً f"RVG-{d['label']}"
+            "vless_link": generate_vless_link(uid, host, remark=d['label']),   # بدون RVG
             "sub_url": f"https://{host}/sub/{uid}",
         })
     result.sort(key=lambda x: x["created_at"], reverse=True)
@@ -617,7 +626,7 @@ async def http_proxy(target_url: str, request: Request):
         raise HTTPException(status_code=502, detail=f"Proxy error: {exc}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HTML Pages
+# HTML Pages (بدون تغییر)
 # ══════════════════════════════════════════════════════════════════════════════
 
 LOGIN_HTML = r"""<!DOCTYPE html>
