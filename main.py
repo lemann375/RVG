@@ -4,6 +4,7 @@ import os
 import hashlib
 import secrets
 import time
+import base64
 import aiofiles
 from datetime import datetime, timedelta
 from urllib.parse import quote
@@ -211,6 +212,15 @@ def is_link_allowed(link: dict | None) -> bool:
         return False
     return True
 
+def make_profile_title(remark: str) -> str:
+    """Encode a remark for use in HTTP header, supporting UTF-8."""
+    try:
+        remark.encode("latin-1")
+        return remark
+    except UnicodeEncodeError:
+        b64 = base64.b64encode(remark.encode("utf-8")).decode("ascii")
+        return f"=?UTF-8?B?{b64}?="
+
 # ── Default link ──────────────────────────────────────────────────────────────
 _default_link_created = False
 
@@ -254,7 +264,6 @@ NO_CACHE_HEADERS = {
 
 @app.get("/sub/{uuid}")
 async def subscription_single(uuid: str):
-    import base64
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
     if not link or not is_link_allowed(link):
@@ -269,14 +278,13 @@ async def subscription_single(uuid: str):
     content = base64.b64encode(vless.encode()).decode()
     headers = {
         **NO_CACHE_HEADERS,
-        "profile-title": remark,
+        "profile-title": make_profile_title(remark),
         "support-url": "https://t.me/CodeBoxo"
     }
     return Response(content=content, media_type="text/plain", headers=headers)
 
 @app.get("/sub-all")
 async def subscription_all(_=Depends(require_auth)):
-    import base64
     host = get_host()
     async with LINKS_LOCK:
         lines = []
@@ -290,7 +298,7 @@ async def subscription_all(_=Depends(require_auth)):
     content = base64.b64encode("\n".join(lines).encode()).decode()
     headers = {
         **NO_CACHE_HEADERS,
-        "profile-title": "RVG All Configs",
+        "profile-title": make_profile_title("RVG All Configs"),
         "support-url": "https://t.me/CodeBoxo"
     }
     return Response(content=content, media_type="text/plain", headers=headers)
@@ -1069,7 +1077,7 @@ a{color:inherit;text-decoration:none}
   </div>
 </section>
 
-<!-- LINKS: ستون جدید "وضعیت اتصال" اضافه شد -->
+<!-- LINKS -->
 <section class="pg" id="pg-links">
   <div class="topbar">
     <div><div class="tb-title"><i class="ti ti-link-plus"></i> مدیریت لینک‌ها</div><div class="tb-sub">ساخت و مدیریت کانفیگ با سهمیه و تاریخ انقضا</div></div>
@@ -1478,7 +1486,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   await checkAuth();
   initCharts();
   document.getElementById('set-host').textContent=location.host;
-  document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'//'+location.host+'/sub-all');
+  document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'/sub-all');
   updateOnlineStatus();
   fetchStats();fetchDefaultVless();loadLinks();
   setInterval(fetchStats,4000);
