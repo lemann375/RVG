@@ -153,7 +153,7 @@ def generate_uuid() -> str:
     h = secrets.token_hex(16)
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
-def generate_vless_link(uuid: str, host: str, remark: str = "RVG") -> str:
+def generate_vless_link(uuid: str, host: str, remark: str = "R") -> str:
     path = f"/ws/{uuid}"
     params = {
         "encryption": "none",
@@ -248,7 +248,7 @@ async def subscription_single(uuid: str):
     if not link or not is_link_allowed(link):
         raise HTTPException(status_code=404, detail="not found or inactive")
     host = get_host()
-    vless = generate_vless_link(uuid, host, remark=f"RVG-{link['label']}")
+    vless = generate_vless_link(uuid, host, remark=f"R-{link['label']}")
     content = base64.b64encode(vless.encode()).decode()
     return Response(content=content, media_type="text/plain",
                     headers={"profile-title": link["label"], "support-url": "https://t.me/CodeBoxo"})
@@ -259,7 +259,7 @@ async def subscription_all(_=Depends(require_auth)):
     host = get_host()
     async with LINKS_LOCK:
         lines = [
-            generate_vless_link(uid, host, remark=f"RVG-{d['label']}")
+            generate_vless_link(uid, host, remark=f"R-{d['label']}")
             for uid, d in LINKS.items()
             if is_link_allowed(d)
         ]
