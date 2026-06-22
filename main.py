@@ -190,12 +190,8 @@ def is_link_expired(link: dict) -> bool:
         return False
 
 def is_link_allowed(link: dict | None) -> bool:
-    """
-    ✅ FIX: اگه link وجود نداشته باشه → رد کن (قبلاً True برمیگشت!)
-    True فقط اگه لینک موجود، فعال، منقضی‌نشده و در سهمیه باشه
-    """
     if link is None:
-        return False  # ← FIX: UUID ناشناس رد میشه
+        return False
     if not link.get("active", True):
         return False
     if is_link_expired(link):
@@ -239,32 +235,95 @@ async def root():
 async def health():
     return {"status": "ok", "connections": len(connections), "uptime": uptime()}
 
-# ── Subscription ──────────────────────────────────────────────────────────────
+# ── Subscription (Updated with Traffic Info) ────────────────────────────────
 @app.get("/sub/{uuid}")
 async def subscription_single(uuid: str):
     import base64
+    from datetime import datetime
+    
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
+    
     if not link or not is_link_allowed(link):
         raise HTTPException(status_code=404, detail="not found or inactive")
+    
     host = get_host()
     vless = generate_vless_link(uuid, host, remark=f"R-{link['label']}")
     content = base64.b64encode(vless.encode()).decode()
-    return Response(content=content, media_type="text/plain",
-                    headers={"profile-title": link["label"], "support-url": "https://t.me/CodeBoxo"})
+    
+    # محاسبه اطلاعات حجمی برای هدر
+    used_bytes = link.get("used_bytes", 0)
+    total_bytes = link.get("limit_bytes", 0)
+    
+    # محاسبه تاریخ انقضا (Unix Timestamp)
+    expire_timestamp = 0
+    if link.get("expires_at"):
+        try:
+            dt = datetime.fromisoformat(link["expires_at"])
+            expire_timestamp = int(dt.timestamp())
+        except:
+            expire_timestamp = 0
+            
+    # ایجاد هدر استاندارد برای نمایش در کلاینت‌ها
+    userinfo_header = f"upload=0; download={used_bytes}; total={total_bytes}; expire={expire_timestamp}"
+    
+    return Response(
+        content=content, 
+        media_type="text/plain",
+        headers={
+            "profile-title": link["label"], 
+            "support-url": "https://t.me/CodeBoxo",
+            "Subscription-Userinfo": userinfo_header
+        }
+    )
 
 @app.get("/sub-all")
 async def subscription_all(_=Depends(require_auth)):
     import base64
+    from datetime import datetime
+    
     host = get_host()
+    total_used = 0
+    total_limit = 0
+    min_expire = 0
+    
     async with LINKS_LOCK:
-        lines = [
-            generate_vless_link(uid, host, remark=f"R-{d['label']}")
-            for uid, d in LINKS.items()
-            if is_link_allowed(d)
-        ]
+        allowed_links = [(uid, d) for uid, d in LINKS.items() if is_link_allowed(d)]
+        
+        # محاسبه مجموع حجم‌ها برای هدر
+        for uid, d in allowed_links:
+            total_used += d.get("used_bytes", 0)
+            total_limit += d.get("limit_bytes", 0)
+            
+            # پیدا کردن نزدیک‌ترین تاریخ انقضا
+            if d.get("expires_at"):
+                try:
+                    dt = datetime.fromisoformat(d["expires_at"])
+                    ts = int(dt.timestamp())
+                    if min_expire == 0 or ts < min_expire:
+                        min_expire = ts
+                except: pass
+
+    lines = [
+        generate_vless_link(uid, host, remark=f"R-{d['label']}")
+        for uid, d in allowed_links
+    ]
+    
+    if not lines:
+        raise HTTPException(status_code=404, detail="No active links found")
+        
     content = base64.b64encode("\n".join(lines).encode()).decode()
-    return Response(content=content, media_type="text/plain")
+    
+    # ساخت هدر برای فایل سابسکریپشن کلی
+    userinfo_header = f"upload=0; download={total_used}; total={total_limit}; expire={min_expire}"
+    
+    return Response(
+        content=content, 
+        media_type="text/plain",
+        headers={
+            "Subscription-Userinfo": userinfo_header
+        }
+    )
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────
 @app.post("/api/login")
@@ -411,7 +470,6 @@ async def delete_link(uid: str, _=Depends(require_auth)):
 # VLESS Relay — بهینه‌شده برای حداکثر throughput
 # ══════════════════════════════════════════════════════════════════════════════
 
-# بافر 256KB برای throughput بالاتر
 RELAY_BUF = 256 * 1024
 
 async def parse_vless_header(chunk: bytes):
@@ -436,13 +494,8 @@ async def parse_vless_header(chunk: bytes):
     return command, address, port, chunk[pos:]
 
 async def check_and_use(uid: str, n: int) -> bool:
-    """
-    ✅ FIX: UUID ناشناس → رد کن (قبلاً True برمیگشت!)
-    چک کوتا + فعال/منقضی بودن لینک
-    """
     async with LINKS_LOCK:
         link = LINKS.get(uid)
-        # ← FIX: اگه لینک وجود نداشته باشه رد کن
         if link is None:
             return False
         if not is_link_allowed(link):
@@ -452,10 +505,7 @@ async def check_and_use(uid: str, n: int) -> bool:
         hourly_traffic[datetime.now().strftime("%H:00")] += n
     return True
 
-# ── Relay بهینه: بدون await drain در هر بسته ────────────────────────────────
-
 async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str):
-    """WebSocket → TCP با بافر جمع‌شده برای کاهش سربار"""
     try:
         while True:
             msg = await ws.receive()
@@ -464,14 +514,12 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
             data = msg.get("bytes") or (msg.get("text") or "").encode()
             if not data:
                 continue
-            # ✅ FIX: چک میکنه لینک هنوز فعاله
             if not await check_and_use(uid, len(data)):
                 await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
             stats["total_requests"] += 1
             connections[conn_id]["bytes"] += len(data)
             writer.write(data)
-            # drain فقط وقتی بافر پر باشه → کمتر سربار
             if writer.transport.get_write_buffer_size() > RELAY_BUF:
                 await writer.drain()
     except (WebSocketDisconnect, Exception):
@@ -483,20 +531,16 @@ async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: 
             pass
 
 async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: str, uid: str):
-    """TCP → WebSocket با خواندن greedy برای throughput بالاتر"""
     first = True
     try:
         while True:
-            # readany → بلافاصله هر داده‌ای که آماده‌ست برمیگردونه
             data = await reader.read(RELAY_BUF)
             if not data:
                 break
-            # ✅ FIX: چک میکنه لینک هنوز فعاله
             if not await check_and_use(uid, len(data)):
-                await ws.close(code=1008, reason="quota/disabled/unknown")
+                await ws.close(code=1008, reason="quota/disabled")
                 break
             connections[conn_id]["bytes"] += len(data)
-            # هدر VLESS response فقط برای اولین پکت
             payload = (b"\x00\x00" + data) if first else data
             first = False
             await ws.send_bytes(payload)
@@ -507,12 +551,10 @@ async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: 
 async def websocket_tunnel(ws: WebSocket, uuid: str):
     await ws.accept()
 
-    # ✅ FIX: اول چک کن UUID در لینک‌ها هست و مجاز است
     async with LINKS_LOCK:
         link = LINKS.get(uuid)
 
     if not is_link_allowed(link):
-        # UUID ناشناس، حذف‌شده، غیرفعال، منقضی یا تموم‌شده سهمیه
         logger.warning(f"🚫 WS rejected uuid={uuid[:8]}… (not allowed)")
         await ws.close(code=1008, reason="not authorized")
         return
@@ -532,7 +574,6 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
 
         command, address, port, payload = await parse_vless_header(first_chunk)
 
-        # ✅ چک مجدد بعد از دریافت هدر (ممکنه بین accept و اینجا تغییر کرده باشه)
         if not await check_and_use(uuid, len(first_chunk)):
             await ws.close(code=1008, reason="quota/disabled")
             return
@@ -541,12 +582,10 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
         connections[conn_id]["bytes"] += len(first_chunk)
         logger.info(f"➡️  [{conn_id}] → {address}:{port}")
 
-        # TCP با TCP_NODELAY برای کاهش تأخیر
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(address, port),
             timeout=10.0
         )
-        # فعال‌سازی TCP_NODELAY → کاهش latency
         sock = writer.transport.get_extra_info('socket')
         if sock:
             import socket
@@ -556,7 +595,6 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
             writer.write(payload)
             await writer.drain()
 
-        # هر دو relay موازی، اولی که تموم شد بقیه هم cancel
         done, pending = await asyncio.wait(
             {
                 asyncio.create_task(relay_ws_to_tcp(ws, writer, conn_id, uuid)),
@@ -674,7 +712,7 @@ input:focus+.ic{color:var(--accent)}
 <div class="wrap">
   <div class="card">
     <div class="brand">
-      <div class="brand-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="codebox"></div>
+      <div class="brand-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k0x00ffffff-no-rj" alt="codebox"></div>
       <div><div class="brand-name">codebox</div><div class="brand-sub">RVG Gateway · v8.1</div></div>
     </div>
     <h1>ورود به پنل</h1>
@@ -939,7 +977,7 @@ a{color:inherit;text-decoration:none}
 <div class="toast" id="toast"></div>
 <div class="mob-top">
   <div class="ml">
-    <div class="mob-logo"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="cb"></div>
+    <div class="mob-logo"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k0x00ffffff-no-rj" alt="cb"></div>
     <span class="mob-title">RVG Gateway</span>
   </div>
   <div class="mob-right">
@@ -951,7 +989,7 @@ a{color:inherit;text-decoration:none}
 <aside class="sidebar" id="sb">
   <button class="sb-close" id="close-sb"><i class="ti ti-x"></i></button>
   <div class="logo">
-    <div class="logo-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="cb"></div>
+    <div class="logo-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k0x00ffffff-no-rj" alt="cb"></div>
     <div><div class="logo-name">codebox</div><div class="logo-sub">RVG Gateway · v8.1</div></div>
   </div>
   <div class="nav-wrap">
@@ -1296,7 +1334,7 @@ async function fetchStats(){
 function renderErrs(errs){
   const el=document.getElementById('errs-full');if(!el)return;
   if(!errs.length){el.innerHTML='<div style="color:var(--green-t);padding:10px;font-size:12px;display:flex;align-items:center;gap:5px"><i class="ti ti-circle-check"></i> هیچ خطایی نیست</div>';return}
-  el.innerHTML=errs.slice().reverse().map(e=>`<div class="erow"><div class="etime"><i class="ti ti-clock"></i>${new Date(e.time).toLocaleString('fa-IR')}</div><div class="emsg">${esc(e.error)}${e.url?' — '+esc(e.url):''}</div></div>`).join('');
+  el.innerHTML=errs.slice().reverse().map(e=>`<div class="erow"><div class="etime"><i class="ti ti-clock"></i>${new Date(e.time).toLocaleString('fa-IR')}${esc(e.error)}${e.url?' — '+esc(e.url):''}</div></div>`).join('');
 }
 
 async function loadLinks(){
@@ -1312,8 +1350,7 @@ async function loadLinks(){
     tb.innerHTML=links.map(l=>{
       const lim=l.limit_bytes===0?'∞':fmtB(l.limit_bytes),pct=l.limit_bytes===0?0:Math.min(100,l.used_bytes/l.limit_bytes*100),bc=pct>90?'var(--red)':pct>70?'var(--amber)':'var(--accent)',allowed=l.active&&!l.expired;
       return `<tr>
-        <td><div class="ll">${esc(l.label)}</div><div class="lm"><span>${new Date(l.created_at).toLocaleDateString('fa-IR')}</span>${l.note?`<span title="${esc(l.note)}"><i class="ti ti-note"></i>${esc(l.note.slice(0,25))}${l.note.length>25?'...':''}</span>`:''}</div></td>
-        <td><span class="uuid-chip" onclick="navigator.clipboard.writeText('${l.uuid}').then(()=>toast('UUID کپی شد','ok'))" title="کلیک برای کپی">${l.uuid.slice(0,13)}…</span></td>
+        <td><div class="ll">${esc(l.label)}${new Date(l.created_at).toLocaleDateString('fa-IR')}</span>${l.note?`${l.uuid.slice(0,13)}…</span></td>
         <td><div style="width:120px"><div class="ubar"><div class="ubar-f" style="width:${pct}%;background:${bc}"></div></div><div class="utxt">${fmtB(l.used_bytes)} / ${lim}</div></div></td>
         <td>${expChip(l.expires_at,l.expired)}</td>
         <td><button class="tog${allowed?' on':''}" onclick="toggleActive('${l.uuid}',${!l.active})" title="${l.active?'غیرفعال کن':'فعال کن'}"></button></td>
@@ -1326,7 +1363,7 @@ async function loadLinks(){
         </div></td>
       </tr>`;
     }).join('');
-    document.getElementById('lsummary').innerHTML=links.slice(0,6).map(l=>`<div class="sr"><span class="sr-k" style="gap:5px"><i class="ti ${l.expired?'ti-calendar-x':l.active?'ti-circle-check':'ti-circle-x'}" style="color:${l.expired?'var(--amber)':l.active?'var(--green)':'var(--red)'}"></i>${esc(l.label)}</span><span class="sr-v" style="font-size:10px">${fmtB(l.used_bytes)} / ${l.limit_bytes===0?'∞':fmtB(l.limit_bytes)}</span></div>`).join('');
+    document.getElementById('lsummary').innerHTML=links.slice(0,6).map(l=>`<div class="sr"><span class="sr-k" style="gap:5px"><i class="ti ${l.expired?'ti-calendar-x':l.active?'ti-circle-check':'ti-circle-x'}" style="color:${l.expired?'var(--amber)':l.active?'var(--green)':'var(--red)'}"></i>${esc(l.label)}${fmtB(l.used_bytes)} / ${l.limit_bytes===0?'∞':fmtB(l.limit_bytes)}</span></div>`).join('');
   }catch(e){console.error(e)}
 }
 
@@ -1358,68 +1395,4 @@ async function loadSubs(){
     const links=(d.links||[]).filter(l=>l.active&&!l.expired);
     const el=document.getElementById('sub-list');
     if(!links.length){el.innerHTML='<div class="empty"><i class="ti ti-rss-off"></i><p>هیچ لینک فعالی نیست</p></div>';return}
-    el.innerHTML=links.map(l=>`<div style="padding:12px 14px;background:var(--accent-d);border:1px solid var(--card-b);border-radius:9px;margin-bottom:7px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><div style="font-weight:600;font-size:12px;margin-bottom:3px">${esc(l.label)}</div><div class="sub-url">${esc(l.sub_url)}</div></div><div style="display:flex;gap:5px"><button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.sub_url)}').then(()=>toast('کپی شد','ok'))"><i class="ti ti-copy"></i> کپی</button><button class="btn btn-sm btn-g" onclick="window.open('https://api.qrserver.com/v1/create-qr-code/?size=260x260&data='+encodeURIComponent('${esc(l.sub_url)}'),'_blank')"><i class="ti ti-qrcode"></i></button></div></div>`).join('');
-  }catch(e){}
-}
-function cpSubAll(){navigator.clipboard.writeText(location.protocol+'//'+location.host+'/sub-all').then(()=>toast('آدرس سابسکریپشن کپی شد','ok'))}
-
-async function loadConns(){
-  try{const r=await authF('/stats'),d=await r.json();const cl=document.getElementById('conns-list'),ce=document.getElementById('conns-empty');if(d.active_connections===0){cl.innerHTML='';ce.style.display='block';return}ce.style.display='none';cl.innerHTML=`<div style="padding:13px;background:var(--green-bg);border:1px solid rgba(16,185,129,.15);border-radius:9px;display:flex;align-items:center;gap:12px;font-size:12px;color:var(--green-t)"><span class="dot dg pulse"></span>${d.active_connections} اتصال فعال · کل ${d.total_traffic_mb.toFixed(1)} MB</div>`;}catch(e){}
-}
-async function loadErrs(){try{const r=await authF('/stats'),d=await r.json();renderErrs(d.recent_errors||[]);}catch(e){}}
-
-async function fetchDefaultVless(){
-  try{const r=await authF('/api/links'),d=await r.json();const links=d.links||[];const def=links.find(l=>l.limit_bytes===0&&l.active&&!l.expired)||links.find(l=>l.active&&!l.expired)||links[0];document.getElementById('vless-main').textContent=def?def.vless_link:'هنوز لینکی وجود ندارد — یک لینک بسازید';}catch(e){}
-}
-function cpText(id){navigator.clipboard.writeText(document.getElementById(id).textContent).then(()=>toast('کپی شد','ok'))}
-function qrFor(id){const t=document.getElementById(id).textContent;window.open('https://api.qrserver.com/v1/create-qr-code/?size=280x280&data='+encodeURIComponent(t),'_blank')}
-function refreshAll(){fetchStats();fetchDefaultVless();loadLinks();toast('در حال رفرش...','');if(document.getElementById('pg-subscriptions').classList.contains('on'))loadSubs()}
-
-let ws;
-function wsLog(c,m){const l=document.getElementById('ws-log'),p=document.createElement('p');const colors={ok:'#34D399',err:'#F87171',info:'#7BAED4',sent:'#FCD34D'};p.style.color=colors[c]||'#fff';p.textContent='['+new Date().toLocaleTimeString('fa-IR')+'] '+m;l.appendChild(p);l.scrollTop=l.scrollHeight}
-function wsConn(){const u=document.getElementById('ws-uuid').value.trim();if(!u){toast('UUID یک لینک فعال را وارد کنید','err');return}const url=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws/'+u;wsLog('info','اتصال: '+url);ws=new WebSocket(url);ws.onopen=()=>wsLog('ok','✓ متصل - UUID معتبر است');ws.onerror=()=>wsLog('err','✗ خطا - احتمالاً UUID نامعتبر یا غیرفعال');ws.onmessage=m=>wsLog('info','دریافت '+(m.data.size||m.data.length)+' byte');ws.onclose=e=>wsLog('err','قطع ('+e.code+')'+(e.code===1008?' - دسترسی رد شد':''))}
-function wsSend(){const m=document.getElementById('ws-msg').value;if(!m||!ws||ws.readyState!==1)return;ws.send(m);wsLog('sent','ارسال: '+m);document.getElementById('ws-msg').value=''}
-function wsDisc(){if(ws)ws.close()}
-
-function initCharts(){
-  const opts={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{backgroundColor:'rgba(13,27,46,.95)',borderColor:'rgba(59,130,246,.2)',borderWidth:1,titleColor:'#E8F4FF',bodyColor:'#7BAED4',callbacks:{label:v=>`${v.parsed.y.toFixed(2)} MB`}}},scales:{x:{grid:{color:'rgba(59,130,246,.04)'},ticks:{color:'#3D6B8E',font:{size:9}}},y:{grid:{color:'rgba(59,130,246,.04)'},ticks:{color:'#3D6B8E',font:{size:9},callback:v=>v+'MB'}}}};
-  const ds={label:'MB',data:[],borderColor:'rgba(59,130,246,.8)',backgroundColor:'rgba(59,130,246,.05)',fill:true,tension:.45,pointRadius:3,pointHoverRadius:5,borderWidth:2};
-  ch1=new Chart(document.getElementById('ch1'),{type:'line',data:{labels:[],datasets:[{...ds}]},options:opts});
-  ch3=new Chart(document.getElementById('ch3'),{type:'line',data:{labels:[],datasets:[{...ds}]},options:opts});
-  ch2=new Chart(document.getElementById('ch2'),{type:'doughnut',data:{labels:['VLESS/WS','HTTP Proxy','سایر'],datasets:[{data:[70,25,5],backgroundColor:['rgba(59,130,246,.8)','rgba(16,185,129,.7)','rgba(139,92,246,.7)'],borderColor:'rgba(0,0,0,0)',borderWidth:3,hoverOffset:8}]},options:{responsive:true,maintainAspectRatio:false,cutout:'68%',plugins:{legend:{position:'bottom',labels:{color:'var(--t2)',font:{size:9},padding:10,usePointStyle:true}}}}});
-}
-
-document.addEventListener('DOMContentLoaded',async()=>{
-  await checkAuth();
-  initCharts();
-  document.getElementById('set-host').textContent=location.host;
-  document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'/sub-all');
-  fetchStats();fetchDefaultVless();loadLinks();
-  setInterval(fetchStats,4000);
-  setInterval(()=>{
-    if(document.getElementById('pg-links').classList.contains('on'))loadLinks();
-    if(document.getElementById('pg-subscriptions').classList.contains('on'))loadSubs();
-  },5000);
-});
-</script>
-</body></html>"""
-
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    if await is_valid_session(request.cookies.get(SESSION_COOKIE)):
-        return RedirectResponse(url="/dashboard")
-    return HTMLResponse(content=LOGIN_HTML)
-
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request):
-    if not await is_valid_session(request.cookies.get(SESSION_COOKIE)):
-        return RedirectResponse(url="/login")
-    await ensure_default_link()
-    return HTMLResponse(content=DASHBOARD_HTML)
-
-@app.get("/test-ws", response_class=HTMLResponse)
-async def test_ws_redirect():
-    return HTMLResponse(content="<script>location.href='/dashboard'</script>")
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=CONFIG["port"], log_level="info", workers=1)
+    el.innerHTML=links.map(l=>`<div style="padding:12px 14px;background:var(--accent-d);border:1px solid var(--card-b);border-radius:9px;margin-bottom:7px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><div style="font-weight:600;font-size:12px;margin-bottom:3px">${esc(l.label)}${esc(l.sub_url)}</div></div><div style="display:flex;gap:5px"><button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.sub_url)}').then(()=>toast('کپی شد','ok'))"> کپی
