@@ -352,7 +352,7 @@ async def create_link(request: Request, _=Depends(require_auth)):
         "uuid": uid,
         **LINKS[uid],
         "expired": False,
-        "vless_link": generate_vless_link(uid, host, remark=f"RVG-{label}"),
+        "vless_link": generate_vless_link(uid, host, remark=f"R-{label}"),
         "sub_url": f"https://{host}/sub/{uid}",
     }
 
