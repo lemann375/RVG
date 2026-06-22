@@ -21,7 +21,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("RVG-Gateway")
 
-app = FastAPI(title="RVG Gateway – codebox", docs_url=None, redoc_url=None)
+app = FastAPI(title="RVG Gateway – Panel", docs_url=None, redoc_url=None)
 
 CONFIG = {
     "port": int(os.environ.get("PORT", 8000)),
@@ -717,8 +717,8 @@ input:focus+.ic{color:var(--accent)}
 <div class="wrap">
   <div class="card">
     <div class="brand">
-      <div class="brand-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="codebox"></div>
-      <div><div class="brand-name">codebox</div><div class="brand-sub">RVG Gateway · v8.1</div></div>
+      <div class="brand-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="Panel"></div>
+      <div><div class="brand-name">Panel</div><div class="brand-sub">RVG Gateway · v8.1</div></div>
     </div>
     <h1>ورود به پنل</h1>
     <p class="sub">رمز عبور را برای دسترسی به داشبورد وارد کنید</p>
@@ -762,7 +762,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RVG Gateway · codebox</title>
+<title>RVG Gateway · Panel</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
@@ -983,7 +983,7 @@ a{color:inherit;text-decoration:none}
 <div class="toast" id="toast"></div>
 <div class="mob-top">
   <div class="ml">
-    <div class="mob-logo"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="cb"></div>
+    <div class="mob-logo"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="Panel"></div>
     <span class="mob-title">RVG Gateway</span>
   </div>
   <div class="mob-right">
@@ -995,8 +995,8 @@ a{color:inherit;text-decoration:none}
 <aside class="sidebar" id="sb">
   <button class="sb-close" id="close-sb"><i class="ti ti-x"></i></button>
   <div class="logo">
-    <div class="logo-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="cb"></div>
-    <div><div class="logo-name">codebox</div><div class="logo-sub">RVG Gateway · v8.1</div></div>
+    <div class="logo-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="Panel"></div>
+    <div><div class="logo-name">Panel</div><div class="logo-sub">RVG Gateway · v8.1</div></div>
   </div>
   <div class="nav-wrap">
     <div class="nav-sec">پنل</div>
@@ -1072,7 +1072,7 @@ a{color:inherit;text-decoration:none}
     </div>
   </div>
   <div class="dash-footer">
-    <span class="df-text">codebox RVG Gateway v8.1 · Railway · 2025</span>
+    <span class="df-text">Panel RVG Gateway v8.1 · Railway · 2025</span>
     <a class="df-link" href="https://t.me/CodeBoxo" target="_blank"><i class="ti ti-brand-telegram"></i> t.me/CodeBoxo</a>
   </div>
 </section>
@@ -1153,7 +1153,7 @@ a{color:inherit;text-decoration:none}
     <div class="card-title"><i class="ti ti-users"></i> کاربران متصل</div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>کاربر</th><th>وضعیت</th></tr></thead>
+        <thead><tr><th>کاربر</th><th style="text-align:center">وضعیت</th></tr></thead>
         <tbody id="conns-tbody"></tbody>
       </table>
     </div>
@@ -1452,7 +1452,7 @@ async function loadConns(){
     users.forEach(u => {
       html += `<tr>
         <td><strong>${esc(u.label)}</strong></td>
-        <td><span class="badge bg-green"><span class="dot dg pulse"></span> آنلاین</span></td>
+        <td style="text-align:center"><span class="badge bg-green"><span class="dot dg pulse"></span> آنلاین</span></td>
       </tr>`;
     });
     tbody.innerHTML = html;
