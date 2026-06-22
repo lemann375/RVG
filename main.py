@@ -351,25 +351,29 @@ async def get_stats(_=Depends(require_auth)):
         "expired_links": sum(1 for l in snap.values() if is_link_expired(l)),
     }
 
-# ── NEW: Connections list ────────────────────────────────────────────────────
+# ── Connections list (گروه‌بندی‌شده بر اساس کاربر) ─────────────────────────
 @app.get("/api/connections")
 async def get_connections(_=Depends(require_auth)):
-    """لیست اتصالات فعال WebSocket همراه با برچسب کاربر"""
-    conn_list = []
+    """لیست کاربران آنلاین (بر اساس UUID) بدون نمایش کانکشن‌های تکراری"""
+    user_map = {}
     for conn_id, info in connections.items():
-        label = info.get("label")
-        if label is None:
-            async with LINKS_LOCK:
-                link = LINKS.get(info["uuid"])
-                label = link["label"] if link else "ناشناس"
-        conn_list.append({
-            "conn_id": conn_id,
-            "uuid": info["uuid"],
-            "label": label,
-            "connected_at": info["connected_at"],
-            "bytes": info["bytes"],
-        })
-    return {"connections": conn_list}
+        uid = info["uuid"]
+        if uid not in user_map:
+            label = info.get("label")
+            if label is None:
+                async with LINKS_LOCK:
+                    link = LINKS.get(uid)
+                    label = link["label"] if link else "ناشناس"
+            user_map[uid] = {
+                "uuid": uid,
+                "label": label,
+                "active_connections": 0,
+                "total_bytes": 0,
+            }
+        user_map[uid]["active_connections"] += 1
+        user_map[uid]["total_bytes"] += info["bytes"]
+    
+    return {"users": list(user_map.values())}
 
 # ── Link Management ───────────────────────────────────────────────────────────
 @app.post("/api/links")
@@ -550,7 +554,6 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
         return
 
     conn_id = secrets.token_urlsafe(6)
-    # ذخیره اطلاعات اتصال همراه با برچسب کاربر
     connections[conn_id] = {
         "uuid": uuid,
         "connected_at": datetime.now().isoformat(),
@@ -1130,24 +1133,24 @@ a{color:inherit;text-decoration:none}
   <div class="card"><div class="card-title"><i class="ti ti-chart-area"></i> نمودار ترافیک ساعتی</div><div class="ch-lg"><canvas id="ch3"></canvas></div></div>
 </section>
 
-<!-- CONNECTIONS (بازنویسی شده برای نمایش کاربران متصل) -->
+<!-- CONNECTIONS (نمایش کاربران آنلاین، بدون جزئیات کانکشن‌ها) -->
 <section class="pg" id="pg-connections">
   <div class="topbar">
-    <div><div class="tb-title"><i class="ti ti-plug-connected"></i> اتصالات</div><div class="tb-sub">کاربران متصل در لحظه</div></div>
+    <div><div class="tb-title"><i class="ti ti-plug-connected"></i> اتصالات</div><div class="tb-sub">کاربران آنلاین</div></div>
     <div class="tb-right">
       <span class="badge bg-green" id="conns-live">—</span>
       <button class="btn btn-p btn-sm" onclick="loadConns()"><i class="ti ti-refresh"></i> رفرش</button>
     </div>
   </div>
   <div class="card">
-    <div class="card-title"><i class="ti ti-users"></i> کاربران فعال</div>
+    <div class="card-title"><i class="ti ti-users"></i> کاربران متصل</div>
     <div style="overflow-x:auto">
-      <table class="tbl" id="conns-table">
-        <thead><tr><th>کاربر (برچسب)</th><th>UUID</th><th>زمان اتصال</th><th>ترافیک رد و بدل شده</th></tr></thead>
+      <table class="tbl">
+        <thead><tr><th>کاربر</th><th>وضعیت</th></tr></thead>
         <tbody id="conns-tbody"></tbody>
       </table>
     </div>
-    <div class="empty" id="conns-empty" style="display:none"><i class="ti ti-plug-off"></i><p>هیچ اتصال فعالی نیست</p></div>
+    <div class="empty" id="conns-empty" style="display:none"><i class="ti ti-plug-off"></i><p>هیچ کاربری آنلاین نیست</p></div>
   </div>
 </section>
 
@@ -1411,30 +1414,26 @@ async function loadSubs(){
 }
 function cpSubAll(){navigator.clipboard.writeText(location.protocol+'//'+location.host+'/sub-all').then(()=>toast('آدرس سابسکریپشن کپی شد','ok'))}
 
-// بارگذاری لیست اتصالات (کاربران متصل)
+// بارگذاری لیست کاربران آنلاین (بدون نمایش کانکشن‌های تکراری)
 async function loadConns(){
   try {
     const r = await authF('/api/connections');
     const d = await r.json();
-    const conns = d.connections || [];
-    document.getElementById('conns-live').innerHTML = `<span class="dot dg pulse"></span> ${conns.length} کاربر`;
+    const users = d.users || [];
+    document.getElementById('conns-live').innerHTML = `<span class="dot dg pulse"></span> ${users.length} کاربر`;
     const tbody = document.getElementById('conns-tbody');
     const empty = document.getElementById('conns-empty');
-    if (conns.length === 0) {
+    if (users.length === 0) {
       tbody.innerHTML = '';
       empty.style.display = 'block';
       return;
     }
     empty.style.display = 'none';
     let html = '';
-    conns.forEach(c => {
-      const shortUuid = c.uuid.slice(0, 13) + '…';
-      const time = new Date(c.connected_at).toLocaleString('fa-IR');
+    users.forEach(u => {
       html += `<tr>
-        <td><strong>${esc(c.label)}</strong></td>
-        <td><span class="uuid-chip" title="${c.uuid}">${shortUuid}</span></td>
-        <td>${time}</td>
-        <td>${fmtB(c.bytes)}</td>
+        <td><strong>${esc(u.label)}</strong></td>
+        <td><span class="badge bg-green"><span class="dot dg pulse"></span> آنلاین</span></td>
       </tr>`;
     });
     tbody.innerHTML = html;
