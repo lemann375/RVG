@@ -1069,7 +1069,7 @@ a{color:inherit;text-decoration:none}
   </div>
 </section>
 
-<!-- LINKS: ستون جدید "وضعیت اتصال" اضافه شد -->
+<!-- LINKS: ستون "وضعیت اتصال" بین عنوان و UUID -->
 <section class="pg" id="pg-links">
   <div class="topbar">
     <div><div class="tb-title"><i class="ti ti-link-plus"></i> مدیریت لینک‌ها</div><div class="tb-sub">ساخت و مدیریت کانفیگ با سهمیه و تاریخ انقضا</div></div>
@@ -1478,7 +1478,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   await checkAuth();
   initCharts();
   document.getElementById('set-host').textContent=location.host;
-  document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'//'+location.host+'/sub-all');
+  document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'/sub-all');
   updateOnlineStatus();
   fetchStats();fetchDefaultVless();loadLinks();
   setInterval(fetchStats,4000);
@@ -1510,4 +1510,4 @@ async def test_ws_redirect():
     return HTMLResponse(content="<script>location.href='/dashboard'</script>")
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=CONFIG["port"], log_level="info", workers=1)
+    uvicorn.run("app:app", host="0.0.0.0", port=CONFIG["port"], log_level="info", workers=1)
