@@ -1083,19 +1083,7 @@ a{color:inherit;text-decoration:none}
     <div><div class="tb-title"><i class="ti ti-link-plus"></i> مدیریت لینک‌ها</div><div class="tb-sub">ساخت و مدیریت کانفیگ با سهمیه و تاریخ انقضا</div></div>
     <div class="tb-right"><span class="badge bg-blue" id="links-pg-cnt">۰ لینک</span></div>
   </div>
-  <div class="card mb16">
-    <div class="card-title"><i class="ti ti-plus"></i> ساخت لینک جدید</div>
-    <div class="form-row">
-      <div class="fg" style="flex:1;min-width:150px"><label>عنوان لینک</label><input class="fi" id="nl-label" placeholder="مثلاً: کاربر علی" style="width:100%"></div>
-      <div class="fg"><label>سهمیه ترافیک</label><input class="fi" id="nl-val" type="number" min="0" step="0.1" placeholder="0=بی‌نهایت" style="width:120px"></div>
-      <div class="fg"><label>واحد</label><select class="fs" id="nl-unit"><option value="GB">GB</option><option value="MB" selected>MB</option></select></div>
-      <div class="fg"><label>انقضا (روز)</label><input class="fi" id="nl-exp" type="number" min="0" step="1" placeholder="0=بی‌نهایت" style="width:100px"></div>
-      <div class="fg" style="flex:1;min-width:130px"><label>یادداشت</label><input class="fi" id="nl-note" placeholder="اختیاری" style="width:100%"></div>
-      <button class="btn btn-p" onclick="createLink()"><i class="ti ti-link-plus"></i> ساخت</button>
-    </div>
-    <div class="cl"><i class="ti ti-info-circle"></i><span>UUID هر لینک کاملاً رندوم است. فقط UUID‌های ثبت‌شده در سیستم می‌توانند اتصال برقرار کنند.</span></div>
-  </div>
-  <!-- نوار جستجوی پیشرفته -->
+  <!-- نوار جستجوی پیشرفته (بالا) -->
   <div class="card mb16">
     <div class="card-title"><i class="ti ti-search"></i> جستجوی پیشرفته</div>
     <div class="form-row">
@@ -1125,6 +1113,19 @@ a{color:inherit;text-decoration:none}
       </div>
       <button class="btn btn-o" onclick="clearFilters()"><i class="ti ti-filter-off"></i> پاک‌کردن فیلترها</button>
     </div>
+  </div>
+  <!-- ساخت لینک جدید -->
+  <div class="card mb16">
+    <div class="card-title"><i class="ti ti-plus"></i> ساخت لینک جدید</div>
+    <div class="form-row">
+      <div class="fg" style="flex:1;min-width:150px"><label>عنوان لینک</label><input class="fi" id="nl-label" placeholder="مثلاً: کاربر علی" style="width:100%"></div>
+      <div class="fg"><label>سهمیه ترافیک</label><input class="fi" id="nl-val" type="number" min="0" step="0.1" placeholder="0=بی‌نهایت" style="width:120px"></div>
+      <div class="fg"><label>واحد</label><select class="fs" id="nl-unit"><option value="GB">GB</option><option value="MB" selected>MB</option></select></div>
+      <div class="fg"><label>انقضا (روز)</label><input class="fi" id="nl-exp" type="number" min="0" step="1" placeholder="0=بی‌نهایت" style="width:100px"></div>
+      <div class="fg" style="flex:1;min-width:130px"><label>یادداشت</label><input class="fi" id="nl-note" placeholder="اختیاری" style="width:100%"></div>
+      <button class="btn btn-p" onclick="createLink()"><i class="ti ti-link-plus"></i> ساخت</button>
+    </div>
+    <div class="cl"><i class="ti ti-info-circle"></i><span>UUID هر لینک کاملاً رندوم است. فقط UUID‌های ثبت‌شده در سیستم می‌توانند اتصال برقرار کنند.</span></div>
   </div>
   <div class="card">
     <div class="card-title"><i class="ti ti-list"></i> لینک‌ها</div>
