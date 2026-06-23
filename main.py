@@ -1095,6 +1095,37 @@ a{color:inherit;text-decoration:none}
     </div>
     <div class="cl"><i class="ti ti-info-circle"></i><span>UUID هر لینک کاملاً رندوم است. فقط UUID‌های ثبت‌شده در سیستم می‌توانند اتصال برقرار کنند.</span></div>
   </div>
+  <!-- نوار جستجوی پیشرفته -->
+  <div class="card mb16">
+    <div class="card-title"><i class="ti ti-search"></i> جستجوی پیشرفته</div>
+    <div class="form-row">
+      <div class="fg" style="flex:2;min-width:200px">
+        <label>جستجوی نام یا UUID</label>
+        <input class="fi" id="link-search" placeholder="متن جستجو..." style="width:100%" oninput="filterLinks()">
+      </div>
+      <div class="fg" style="min-width:150px">
+        <label>فیلتر وضعیت</label>
+        <select class="fs" id="link-status-filter" onchange="filterLinks()">
+          <option value="all">همه</option>
+          <option value="active">فعال</option>
+          <option value="expired">منقضی</option>
+          <option value="disabled">غیرفعال</option>
+          <option value="online">آنلاین</option>
+        </select>
+      </div>
+      <div class="fg" style="min-width:150px">
+        <label>مرتب‌سازی</label>
+        <select class="fs" id="link-sort" onchange="filterLinks()">
+          <option value="newest">جدیدترین</option>
+          <option value="oldest">قدیمی‌ترین</option>
+          <option value="name">نام (الفبا)</option>
+          <option value="usage">مصرف (زیاد→کم)</option>
+          <option value="expiry">تاریخ انقضا</option>
+        </select>
+      </div>
+      <button class="btn btn-o" onclick="clearFilters()"><i class="ti ti-filter-off"></i> پاک‌کردن فیلترها</button>
+    </div>
+  </div>
   <div class="card">
     <div class="card-title"><i class="ti ti-list"></i> لینک‌ها</div>
     <div style="overflow-x:auto">
@@ -1103,7 +1134,7 @@ a{color:inherit;text-decoration:none}
         <tbody id="links-tb"></tbody>
       </table>
     </div>
-    <div class="empty" id="links-empty" style="display:none"><i class="ti ti-link-off"></i><p>هنوز لینکی وجود ندارد</p></div>
+    <div class="empty" id="links-empty" style="display:none"><i class="ti ti-link-off"></i><p>هیچ لینکی با این مشخصات یافت نشد</p></div>
   </div>
 </section>
 
@@ -1309,7 +1340,7 @@ overlay.addEventListener('click',closeSb);
 function navTo(name){
   document.querySelectorAll('.nav-it').forEach(n=>n.classList.toggle('on',n.dataset.pg===name));
   document.querySelectorAll('.pg').forEach(p=>p.classList.toggle('on',p.id==='pg-'+name));
-  if(name==='links')loadLinks();
+  if(name==='links'){loadLinks();}
   if(name==='connections')loadConns();
   if(name==='errors')loadErrs();
   if(name==='subscriptions')loadSubs();
@@ -1325,6 +1356,7 @@ async function authF(url,opts){
 
 let prevTraf=0,ch1,ch2,ch3;
 let onlineUuids = new Set();
+let allLinks = []; // ذخیره همه لینک‌ها برای فیلتر
 
 async function updateOnlineStatus(){
   try {
@@ -1368,37 +1400,110 @@ function renderErrs(errs){
   el.innerHTML=errs.slice().reverse().map(e=>`<div class="erow"><div class="etime"><i class="ti ti-clock"></i>${new Date(e.time).toLocaleString('fa-IR')}</div><div class="emsg">${esc(e.error)}${e.url?' — '+esc(e.url):''}</div></div>`).join('');
 }
 
+function filterLinks(){
+  const searchTerm = document.getElementById('link-search').value.toLowerCase();
+  const statusFilter = document.getElementById('link-status-filter').value;
+  const sortBy = document.getElementById('link-sort').value;
+  
+  let filtered = [...allLinks];
+  
+  // فیلتر جستجو
+  if (searchTerm) {
+    filtered = filtered.filter(l => 
+      l.label.toLowerCase().includes(searchTerm) || 
+      l.uuid.includes(searchTerm)
+    );
+  }
+  
+  // فیلتر وضعیت
+  if (statusFilter !== 'all') {
+    filtered = filtered.filter(l => {
+      if (statusFilter === 'active') return l.active && !l.expired;
+      if (statusFilter === 'expired') return l.expired;
+      if (statusFilter === 'disabled') return !l.active;
+      if (statusFilter === 'online') return onlineUuids.has(l.uuid);
+      return true;
+    });
+  }
+  
+  // مرتب‌سازی
+  switch(sortBy) {
+    case 'oldest':
+      filtered.sort((a,b) => new Date(a.created_at) - new Date(b.created_at));
+      break;
+    case 'name':
+      filtered.sort((a,b) => a.label.localeCompare(b.label, 'fa'));
+      break;
+    case 'usage':
+      filtered.sort((a,b) => b.used_bytes - a.used_bytes);
+      break;
+    case 'expiry':
+      filtered.sort((a,b) => {
+        const da = a.expires_at ? new Date(a.expires_at) : new Date('2100-01-01');
+        const db = b.expires_at ? new Date(b.expires_at) : new Date('2100-01-01');
+        return da - db;
+      });
+      break;
+    default: // newest
+      filtered.sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+  }
+  
+  renderLinksTable(filtered);
+}
+
+function renderLinksTable(links){
+  const tb = document.getElementById('links-tb');
+  const empty = document.getElementById('links-empty');
+  document.getElementById('links-pg-cnt').textContent = toFa(links.length) + ' لینک';
+  
+  if (!links.length) {
+    tb.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  
+  tb.innerHTML = links.map(l => {
+    const lim = l.limit_bytes === 0 ? '∞' : fmtB(l.limit_bytes);
+    const pct = l.limit_bytes === 0 ? 0 : Math.min(100, l.used_bytes / l.limit_bytes * 100);
+    const bc = pct > 90 ? 'var(--red)' : pct > 70 ? 'var(--amber)' : 'var(--accent)';
+    const allowed = l.active && !l.expired;
+    const onlineStatusHtml = onlineUuids.has(l.uuid) ? '<span class="online-dot"></span>' : '';
+    
+    return `<tr>
+      <td><div class="ll">${esc(l.label)}</div><div class="lm"><span>${new Date(l.created_at).toLocaleDateString('fa-IR')}</span>${l.note ? `<span title="${esc(l.note)}"><i class="ti ti-note"></i>${esc(l.note.slice(0,25))}${l.note.length>25?'...':''}</span>` : ''}</div></td>
+      <td style="text-align:center">${onlineStatusHtml}</td>
+      <td><span class="uuid-chip" onclick="navigator.clipboard.writeText('${l.uuid}').then(()=>toast('UUID کپی شد','ok'))" title="کلیک برای کپی">${l.uuid.slice(0,13)}…</span></td>
+      <td><div style="width:120px"><div class="ubar"><div class="ubar-f" style="width:${pct}%;background:${bc}"></div></div><div class="utxt">${fmtB(l.used_bytes)} / ${lim}</div></div></td>
+      <td>${expChip(l.expires_at, l.expired)}</td>
+      <td><button class="tog${allowed ? ' on' : ''}" onclick="toggleActive('${l.uuid}', ${!l.active})" title="${l.active ? 'غیرفعال کن' : 'فعال کن'}"></button></td>
+      <td><div style="display:flex;gap:4px;flex-wrap:nowrap">
+        <button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.vless_link)}').then(()=>toast('لینک VLESS کپی شد','ok'))" title="کپی لینک"><i class="ti ti-copy"></i></button>
+        <button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.sub_url)}').then(()=>toast('لینک سابسکریپشن کپی شد','ok'))" title="کپی Sub URL"><i class="ti ti-rss"></i></button>
+        <button class="btn btn-sm btn-g" onclick="window.open('https://api.qrserver.com/v1/create-qr-code/?size=280x280&data='+encodeURIComponent('${esc(l.vless_link)}'),'_blank')" title="QR"><i class="ti ti-qrcode"></i></button>
+        <button class="btn btn-sm btn-g" onclick="resetUsage('${l.uuid}')" title="ریست مصرف"><i class="ti ti-rotate"></i></button>
+        <button class="btn btn-sm btn-d" onclick="deleteLink('${l.uuid}')" title="حذف"><i class="ti ti-trash"></i></button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+function clearFilters(){
+  document.getElementById('link-search').value = '';
+  document.getElementById('link-status-filter').value = 'all';
+  document.getElementById('link-sort').value = 'newest';
+  filterLinks();
+}
+
 async function loadLinks(){
-  try{
-    const r=await authF('/api/links'),d=await r.json();
-    const links=d.links||[];
-    document.getElementById('links-nb').textContent=links.length;
-    document.getElementById('links-pg-cnt').textContent=toFa(links.length)+' لینک';
-    document.getElementById('lsummary-badge').textContent=toFa(links.length);
-    const tb=document.getElementById('links-tb'),empty=document.getElementById('links-empty');
-    if(!links.length){tb.innerHTML='';empty.style.display='block';document.getElementById('lsummary').innerHTML='<div class="empty"><i class="ti ti-link-off"></i><p>لینکی وجود ندارد</p></div>';return}
-    empty.style.display='none';
-    tb.innerHTML=links.map(l=>{
-      const lim=l.limit_bytes===0?'∞':fmtB(l.limit_bytes),pct=l.limit_bytes===0?0:Math.min(100,l.used_bytes/l.limit_bytes*100),bc=pct>90?'var(--red)':pct>70?'var(--amber)':'var(--accent)',allowed=l.active&&!l.expired;
-      const onlineStatusHtml = onlineUuids.has(l.uuid) ? '<span class="online-dot"></span>' : '';
-      return `<tr>
-        <td><div class="ll">${esc(l.label)}</div><div class="lm"><span>${new Date(l.created_at).toLocaleDateString('fa-IR')}</span>${l.note?`<span title="${esc(l.note)}"><i class="ti ti-note"></i>${esc(l.note.slice(0,25))}${l.note.length>25?'...':''}</span>`:''}</div></td>
-        <td style="text-align:center">${onlineStatusHtml}</td>
-        <td><span class="uuid-chip" onclick="navigator.clipboard.writeText('${l.uuid}').then(()=>toast('UUID کپی شد','ok'))" title="کلیک برای کپی">${l.uuid.slice(0,13)}…</span></td>
-        <td><div style="width:120px"><div class="ubar"><div class="ubar-f" style="width:${pct}%;background:${bc}"></div></div><div class="utxt">${fmtB(l.used_bytes)} / ${lim}</div></div></td>
-        <td>${expChip(l.expires_at,l.expired)}</td>
-        <td><button class="tog${allowed?' on':''}" onclick="toggleActive('${l.uuid}',${!l.active})" title="${l.active?'غیرفعال کن':'فعال کن'}"></button></td>
-        <td><div style="display:flex;gap:4px;flex-wrap:nowrap">
-          <button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.vless_link)}').then(()=>toast('لینک VLESS کپی شد','ok'))" title="کپی لینک"><i class="ti ti-copy"></i></button>
-          <button class="btn btn-sm btn-g" onclick="navigator.clipboard.writeText('${esc(l.sub_url)}').then(()=>toast('لینک سابسکریپشن کپی شد','ok'))" title="کپی Sub URL"><i class="ti ti-rss"></i></button>
-          <button class="btn btn-sm btn-g" onclick="window.open('https://api.qrserver.com/v1/create-qr-code/?size=280x280&data='+encodeURIComponent('${esc(l.vless_link)}'),'_blank')" title="QR"><i class="ti ti-qrcode"></i></button>
-          <button class="btn btn-sm btn-g" onclick="resetUsage('${l.uuid}')" title="ریست مصرف"><i class="ti ti-rotate"></i></button>
-          <button class="btn btn-sm btn-d" onclick="deleteLink('${l.uuid}')" title="حذف"><i class="ti ti-trash"></i></button>
-        </div></td>
-      </tr>`;
-    }).join('');
-    document.getElementById('lsummary').innerHTML=links.slice(0,6).map(l=>`<div class="sr"><span class="sr-k" style="gap:5px"><i class="ti ${l.expired?'ti-calendar-x':l.active?'ti-circle-check':'ti-circle-x'}" style="color:${l.expired?'var(--amber)':l.active?'var(--green)':'var(--red)'}"></i>${esc(l.label)}</span><span class="sr-v" style="font-size:10px">${fmtB(l.used_bytes)} / ${l.limit_bytes===0?'∞':fmtB(l.limit_bytes)}</span></div>`).join('');
-  }catch(e){console.error(e)}
+  try {
+    const r = await authF('/api/links');
+    const d = await r.json();
+    allLinks = d.links || [];
+    document.getElementById('links-nb').textContent = allLinks.length;
+    document.getElementById('lsummary-badge').textContent = toFa(allLinks.length);
+    filterLinks(); // نمایش با فیلترها
+  } catch(e) { console.error(e); }
 }
 
 async function createLink(){
