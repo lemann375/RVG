@@ -5,7 +5,6 @@ import hashlib
 import secrets
 import time
 import base64
-import aiofiles
 from datetime import datetime, timedelta
 from urllib.parse import quote
 from collections import deque, defaultdict
@@ -27,6 +26,8 @@ CONFIG = {
     "port": int(os.environ.get("PORT", 8000)),
     "secret": os.environ.get("SECRET_KEY", secrets.token_urlsafe(32)),
     "host": os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost"),
+    "upstash_url": os.environ.get("UPSTASH_URL", ""),
+    "upstash_token": os.environ.get("UPSTASH_TOKEN", ""),
 }
 
 app.add_middleware(
@@ -37,41 +38,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Persistence ──────────────────────────────────────────────────────────────
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-DATA_FILE = DATA_DIR / "rvg_state.json"
-SAVE_LOCK = asyncio.Lock()
+# ── Upstash REST helpers ────────────────────────────────────────────────────
+UPSTASH_STATE_KEY = "rvg_state"
 
+async def upstash_set(data: dict):
+    if not CONFIG["upstash_url"] or not CONFIG["upstash_token"]:
+        logger.warning("Upstash not configured, state not saved")
+        return
+    url = f"{CONFIG['upstash_url']}/set/{UPSTASH_STATE_KEY}"
+    headers = {"Authorization": f"Bearer {CONFIG['upstash_token']}"}
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, headers=headers, json=json.dumps(data, ensure_ascii=False))
+            resp.raise_for_status()
+    except Exception as e:
+        logger.error(f"Upstash save error: {e}")
+
+async def upstash_get() -> dict | None:
+    if not CONFIG["upstash_url"] or not CONFIG["upstash_token"]:
+        logger.warning("Upstash not configured")
+        return None
+    url = f"{CONFIG['upstash_url']}/get/{UPSTASH_STATE_KEY}"
+    headers = {"Authorization": f"Bearer {CONFIG['upstash_token']}"}
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            result = resp.json()
+            if result.get("result"):
+                return json.loads(result["result"])
+    except Exception as e:
+        logger.error(f"Upstash load error: {e}")
+    return None
+
+# ── Persistence (Upstash) ──────────────────────────────────────────────────
 async def load_state():
     global LINKS, AUTH
     try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        if DATA_FILE.exists():
-            async with aiofiles.open(DATA_FILE, "r", encoding="utf-8") as f:
-                raw = await f.read()
-            data = json.loads(raw)
+        data = await upstash_get()
+        if data:
             LINKS.update(data.get("links", {}))
             if "password_hash" in data:
                 AUTH["password_hash"] = data["password_hash"]
-            logger.info(f"✅ State loaded: {len(LINKS)} links")
+            logger.info(f"✅ State loaded from Upstash: {len(LINKS)} links")
+        else:
+            logger.info("No existing state found in Upstash")
     except Exception as e:
         logger.warning(f"Could not load state: {e}")
 
 async def save_state():
-    async with SAVE_LOCK:
-        try:
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            data = {
-                "links": dict(LINKS),
-                "password_hash": AUTH["password_hash"],
-                "saved_at": datetime.now().isoformat(),
-            }
-            tmp = DATA_FILE.with_suffix(".tmp")
-            async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(data, ensure_ascii=False, indent=2))
-            tmp.replace(DATA_FILE)
-        except Exception as e:
-            logger.warning(f"Could not save state: {e}")
+    try:
+        data = {
+            "links": dict(LINKS),
+            "password_hash": AUTH["password_hash"],
+            "saved_at": datetime.now().isoformat(),
+        }
+        await upstash_set(data)
+    except Exception as e:
+        logger.warning(f"Could not save state: {e}")
 
 # ── In-memory state ──────────────────────────────────────────────────────────
 connections: dict = {}
@@ -213,7 +237,6 @@ def is_link_allowed(link: dict | None) -> bool:
     return True
 
 def make_profile_title(remark: str) -> str:
-    """Encode a remark for use in HTTP header, supporting UTF-8."""
     try:
         remark.encode("latin-1")
         return remark
@@ -1235,7 +1258,7 @@ a{color:inherit;text-decoration:none}
       <div class="sr"><span class="sr-k"><i class="ti ti-versions"></i> نسخه</span><span class="sr-v">v8.2</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-brand-fastapi"></i> فریم‌ورک</span><span class="sr-v">FastAPI + Uvicorn</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-cloud"></i> پلتفرم</span><span class="sr-v">Railway</span></div>
-      <div class="sr"><span class="sr-k"><i class="ti ti-device-floppy"></i> ذخیره‌سازی</span><span class="sr-v">JSON File (/data)</span></div>
+      <div class="sr"><span class="sr-k"><i class="ti ti-device-floppy"></i> ذخیره‌سازی</span><span class="sr-v">Upstash Redis</span></div>
     </div>
     <div class="card">
       <div class="card-title"><i class="ti ti-key"></i> تغییر رمز عبور</div>
