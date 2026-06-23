@@ -18,6 +18,15 @@ import uvicorn
 import httpx
 import logging
 
+# ── uvloop speedup ──────────────────────────────────────────────────────────
+try:
+    import uvloop
+    uvloop.install()
+    logger_temp = logging.getLogger("uvloop")
+    logger_temp.info("uvloop installed – faster asyncio event loop")
+except ImportError:
+    pass
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("RVG-Gateway")
 
@@ -85,7 +94,21 @@ error_logs: deque = deque(maxlen=50)
 hourly_traffic: dict = defaultdict(int)
 http_client: httpx.AsyncClient | None = None
 LINKS: dict = {}
-LINKS_LOCK = asyncio.Lock()
+LINKS_LOCK = asyncio.Lock()                     # global lock for dict operations
+
+# per‑UUID locks for concurrent usage updates
+UUID_LOCKS: dict[str, asyncio.Lock] = {}
+UUID_LOCKS_LOCK = asyncio.Lock()
+
+async def get_uuid_lock(uuid: str) -> asyncio.Lock:
+    async with UUID_LOCKS_LOCK:
+        if uuid not in UUID_LOCKS:
+            UUID_LOCKS[uuid] = asyncio.Lock()
+        return UUID_LOCKS[uuid]
+
+async def remove_uuid_lock(uuid: str):
+    async with UUID_LOCKS_LOCK:
+        UUID_LOCKS.pop(uuid, None)
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 SESSION_COOKIE = "rvg_session"
@@ -213,13 +236,47 @@ def is_link_allowed(link: dict | None) -> bool:
     return True
 
 def make_profile_title(remark: str) -> str:
-    """Encode a remark for use in HTTP header, supporting UTF-8."""
     try:
         remark.encode("latin-1")
         return remark
     except UnicodeEncodeError:
         b64 = base64.b64encode(remark.encode("utf-8")).decode("ascii")
         return f"=?UTF-8?B?{b64}?="
+
+# ── DNS cache ─────────────────────────────────────────────────────────────────
+_dns_cache: dict[str, tuple[str, float]] = {}   # key: "host:port" -> (ip, expire_time)
+_dns_cache_lock = asyncio.Lock()
+DNS_TTL = 300  # seconds
+
+async def resolve_host(host: str, port: int) -> str:
+    """Return cached IP for host:port or resolve and cache it."""
+    cache_key = f"{host}:{port}"
+    now = time.time()
+    async with _dns_cache_lock:
+        if cache_key in _dns_cache:
+            ip, expire = _dns_cache[cache_key]
+            if now < expire:
+                return ip
+            else:
+                del _dns_cache[cache_key]
+    # resolve
+    loop = asyncio.get_running_loop()
+    try:
+        info = await loop.getaddrinfo(host, port, family=0, type=0, proto=0, flags=0)
+        for fam, typ, proto, canonname, sockaddr in info:
+            if fam in (2, 0):  # IPv4 preferred
+                ip = sockaddr[0]
+                async with _dns_cache_lock:
+                    _dns_cache[cache_key] = (ip, now + DNS_TTL)
+                return ip
+        # fallback to first result
+        ip = info[0][4][0]
+        async with _dns_cache_lock:
+            _dns_cache[cache_key] = (ip, now + DNS_TTL)
+        return ip
+    except Exception:
+        # on failure, let open_connection resolve by itself
+        return host
 
 # ── Default link ──────────────────────────────────────────────────────────────
 _default_link_created = False
@@ -446,7 +503,10 @@ async def update_link(uid: str, request: Request, _=Depends(require_auth)):
         if "note" in body:
             link["note"] = str(body["note"])[:200]
         if "reset_usage" in body and body["reset_usage"]:
-            link["used_bytes"] = 0
+            # for usage reset, we must acquire per-UUID lock to be safe
+            ulock = await get_uuid_lock(uid)
+            async with ulock:
+                link["used_bytes"] = 0
         if "limit_value" in body:
             lv = float(body.get("limit_value") or 0)
             lu = body.get("limit_unit") or "GB"
@@ -463,6 +523,7 @@ async def delete_link(uid: str, _=Depends(require_auth)):
         if uid not in LINKS:
             raise HTTPException(status_code=404, detail="link not found")
         del LINKS[uid]
+    await remove_uuid_lock(uid)
     asyncio.create_task(save_state())
     return {"ok": True, "deleted": uid}
 
@@ -494,15 +555,20 @@ async def parse_vless_header(chunk: bytes):
     return command, address, port, chunk[pos:]
 
 async def check_and_use(uid: str, n: int) -> bool:
-    async with LINKS_LOCK:
-        link = LINKS.get(uid)
-        if link is None:
-            return False
+    """Thread‑safe usage update using per‑UUID lock."""
+    lock = await get_uuid_lock(uid)
+    async with lock:
+        async with LINKS_LOCK:
+            link = LINKS.get(uid)
+            if link is None:
+                return False
+            # we still check inside the per‑UUID lock (safe)
         if not is_link_allowed(link):
             return False
         link["used_bytes"] += n
-        stats["total_bytes"] += n
-        hourly_traffic[datetime.now().strftime("%H:00")] += n
+    # update global stats (no lock needed)
+    stats["total_bytes"] += n
+    hourly_traffic[datetime.now().strftime("%H:00")] += n
     return True
 
 async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str):
@@ -587,8 +653,11 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
         connections[conn_id]["bytes"] += len(first_chunk)
         logger.info(f"➡️  [{conn_id}] → {address}:{port}")
 
+        # DNS caching: resolve host to IP if it's a hostname
+        target_addr = await resolve_host(address, port)
+
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(address, port),
+            asyncio.open_connection(target_addr, port),
             timeout=10.0
         )
         sock = writer.transport.get_extra_info('socket')
