@@ -38,64 +38,74 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Upstash REST helpers ────────────────────────────────────────────────────
+# ── Upstash optimized client ──────────────────────────────────────────────────
 UPSTASH_STATE_KEY = "rvg_state"
+upstash_client: httpx.AsyncClient | None = None
+_state_dirty = False
+_state_save_lock = asyncio.Lock()
 
 async def upstash_set(data: dict):
+    global _state_dirty
     if not CONFIG["upstash_url"] or not CONFIG["upstash_token"]:
-        logger.warning("Upstash not configured, state not saved")
         return
     url = f"{CONFIG['upstash_url']}/set/{UPSTASH_STATE_KEY}"
     headers = {"Authorization": f"Bearer {CONFIG['upstash_token']}"}
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=headers, json=json.dumps(data, ensure_ascii=False))
-            resp.raise_for_status()
+        resp = await upstash_client.post(url, headers=headers, json=json.dumps(data, ensure_ascii=False))
+        resp.raise_for_status()
+        _state_dirty = False
     except Exception as e:
         logger.error(f"Upstash save error: {e}")
 
 async def upstash_get() -> dict | None:
     if not CONFIG["upstash_url"] or not CONFIG["upstash_token"]:
-        logger.warning("Upstash not configured")
         return None
     url = f"{CONFIG['upstash_url']}/get/{UPSTASH_STATE_KEY}"
     headers = {"Authorization": f"Bearer {CONFIG['upstash_token']}"}
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-            result = resp.json()
-            if result.get("result"):
-                return json.loads(result["result"])
+        resp = await upstash_client.get(url, headers=headers)
+        resp.raise_for_status()
+        result = resp.json()
+        if result.get("result"):
+            return json.loads(result["result"])
     except Exception as e:
         logger.error(f"Upstash load error: {e}")
     return None
 
+async def periodic_state_saver():
+    """Background task: save state every 30 seconds if dirty, and immediately on shutdown."""
+    global _state_dirty
+    while True:
+        await asyncio.sleep(30)
+        if _state_dirty:
+            await save_state(force=True)
+
 # ── Persistence (Upstash) ──────────────────────────────────────────────────
 async def load_state():
     global LINKS, AUTH
-    try:
-        data = await upstash_get()
-        if data:
-            LINKS.update(data.get("links", {}))
-            if "password_hash" in data:
-                AUTH["password_hash"] = data["password_hash"]
-            logger.info(f"✅ State loaded from Upstash: {len(LINKS)} links")
-        else:
-            logger.info("No existing state found in Upstash")
-    except Exception as e:
-        logger.warning(f"Could not load state: {e}")
+    data = await upstash_get()
+    if data:
+        LINKS.update(data.get("links", {}))
+        if "password_hash" in data:
+            AUTH["password_hash"] = data["password_hash"]
+        logger.info(f"✅ State loaded from Upstash: {len(LINKS)} links")
+    else:
+        logger.info("No existing state found in Upstash")
 
-async def save_state():
-    try:
-        data = {
-            "links": dict(LINKS),
-            "password_hash": AUTH["password_hash"],
-            "saved_at": datetime.now().isoformat(),
-        }
-        await upstash_set(data)
-    except Exception as e:
-        logger.warning(f"Could not save state: {e}")
+async def save_state(force=False):
+    global _state_dirty
+    if not force and not _state_dirty:
+        return
+    data = {
+        "links": dict(LINKS),
+        "password_hash": AUTH["password_hash"],
+        "saved_at": datetime.now().isoformat(),
+    }
+    await upstash_set(data)
+
+def mark_state_dirty():
+    global _state_dirty
+    _state_dirty = True
 
 # ── In-memory state ──────────────────────────────────────────────────────────
 connections: dict = {}
@@ -155,20 +165,28 @@ async def require_auth(request: Request):
 # ── Startup / Shutdown ────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
-    global http_client
+    global http_client, upstash_client
+    # client for outgoing proxy
     limits = httpx.Limits(max_connections=500, max_keepalive_connections=100)
     timeout = httpx.Timeout(30.0, connect=10.0)
-    http_client = httpx.AsyncClient(
-        limits=limits, timeout=timeout, follow_redirects=True,
+    http_client = httpx.AsyncClient(limits=limits, timeout=timeout, follow_redirects=True)
+    # dedicated client for Upstash with HTTP/1.1 keep-alive
+    upstash_client = httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        timeout=httpx.Timeout(5.0, connect=2.0),
     )
     await load_state()
-    logger.info(f"🚀 RVG Gateway v8.1 started on port {CONFIG['port']}")
+    # start periodic saver
+    asyncio.create_task(periodic_state_saver())
+    logger.info(f"🚀 RVG Gateway v8.2 started on port {CONFIG['port']}")
 
 @app.on_event("shutdown")
 async def shutdown():
-    await save_state()
+    await save_state(force=True)
     if http_client:
         await http_client.aclose()
+    if upstash_client:
+        await upstash_client.aclose()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def get_host() -> str:
@@ -266,7 +284,7 @@ async def ensure_default_link():
                     "note": "",
                     "is_default": True,
                 }
-                asyncio.create_task(save_state())
+                mark_state_dirty()
         _default_link_created = True
 
 # ── Basic endpoints ───────────────────────────────────────────────────────────
@@ -360,7 +378,8 @@ async def api_change_password(request: Request, token=Depends(require_auth)):
     async with SESSIONS_LOCK:
         SESSIONS.clear()
         SESSIONS[token] = time.time() + SESSION_TTL
-    await save_state()
+    mark_state_dirty()
+    await save_state(force=True)
     return {"ok": True}
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
@@ -428,7 +447,8 @@ async def create_link(request: Request, _=Depends(require_auth)):
             "note": note,
             "is_default": False,
         }
-    asyncio.create_task(save_state())
+        mark_state_dirty()
+    asyncio.create_task(save_state(force=True))
     host = get_host()
     return {
         "uuid": uid,
@@ -477,7 +497,8 @@ async def update_link(uid: str, request: Request, _=Depends(require_auth)):
         if "expires_days" in body:
             ed = int(body["expires_days"] or 0)
             link["expires_at"] = (datetime.now() + timedelta(days=ed)).isoformat() if ed > 0 else None
-    asyncio.create_task(save_state())
+        mark_state_dirty()
+    asyncio.create_task(save_state(force=True))
     return {"ok": True}
 
 @app.delete("/api/links/{uid}")
@@ -486,11 +507,12 @@ async def delete_link(uid: str, _=Depends(require_auth)):
         if uid not in LINKS:
             raise HTTPException(status_code=404, detail="link not found")
         del LINKS[uid]
-    asyncio.create_task(save_state())
+        mark_state_dirty()
+    asyncio.create_task(save_state(force=True))
     return {"ok": True, "deleted": uid}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# VLESS Relay
+# VLESS Relay (no save_state on close – only in-memory updates)
 # ══════════════════════════════════════════════════════════════════════════════
 
 RELAY_BUF = 256 * 1024
@@ -526,6 +548,7 @@ async def check_and_use(uid: str, n: int) -> bool:
         link["used_bytes"] += n
         stats["total_bytes"] += n
         hourly_traffic[datetime.now().strftime("%H:00")] += n
+        mark_state_dirty()  # only mark dirty, actual save is periodic
     return True
 
 async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str):
@@ -637,8 +660,6 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
             except asyncio.CancelledError:
                 pass
 
-        asyncio.create_task(save_state())
-
     except WebSocketDisconnect:
         pass
     except asyncio.TimeoutError:
@@ -681,9 +702,8 @@ async def http_proxy(target_url: str, request: Request):
         raise HTTPException(status_code=502, detail=f"Proxy error: {exc}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HTML Pages
+# HTML Pages (unchanged from previous Persian version)
 # ══════════════════════════════════════════════════════════════════════════════
-
 LOGIN_HTML = r"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
@@ -741,7 +761,7 @@ input:focus+.ic{color:var(--accent)}
   <div class="card">
     <div class="brand">
       <div class="brand-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="Panel"></div>
-      <div><div class="brand-name">Panel</div><div class="brand-sub">RVG Gateway · v8.1</div></div>
+      <div><div class="brand-name">Panel</div><div class="brand-sub">RVG Gateway · v8.2</div></div>
     </div>
     <h1>ورود به پنل</h1>
     <p class="sub">رمز عبور را برای دسترسی به داشبورد وارد کنید</p>
@@ -1019,7 +1039,7 @@ a{color:inherit;text-decoration:none}
   <button class="sb-close" id="close-sb"><i class="ti ti-x"></i></button>
   <div class="logo">
     <div class="logo-img"><img src="https://yt3.googleusercontent.com/vA6bYj1V386YmibpWRNFJtsRRqwfY_U9wnb7gmW90eRVXyNB7gAfjj1XPs5UX0cdKdQprrI=s160-c-k-c0x00ffffff-no-rj" alt="Panel"></div>
-    <div><div class="logo-name">Panel</div><div class="logo-sub">RVG Gateway · v8.1</div></div>
+    <div><div class="logo-name">Panel</div><div class="logo-sub">RVG Gateway · v8.2</div></div>
   </div>
   <div class="nav-wrap">
     <div class="nav-sec">پنل</div>
@@ -1095,7 +1115,7 @@ a{color:inherit;text-decoration:none}
     </div>
   </div>
   <div class="dash-footer">
-    <span class="df-text">Panel RVG Gateway v8.1 · Railway · 2025</span>
+    <span class="df-text">Panel RVG Gateway v8.2 · Railway · 2025</span>
     <a class="df-link" href="https://t.me/CodeBoxo" target="_blank"><i class="ti ti-brand-telegram"></i> t.me/CodeBoxo</a>
   </div>
 </section>
@@ -1198,14 +1218,14 @@ a{color:inherit;text-decoration:none}
     </div>
     <div class="card">
       <div class="card-title"><i class="ti ti-shield-check"></i> کنترل دسترسی</div>
-      <div class="sr"><span class="sr-k"><i class="ti ti-id-badge"></i> UUID Auth سخت‌گیرانه</span><span class="sr-v" style="color:var(--green-t)">● فعال v8.1</span></div>
+      <div class="sr"><span class="sr-k"><i class="ti ti-id-badge"></i> UUID Auth سخت‌گیرانه</span><span class="sr-v" style="color:var(--green-t)">● فعال v8.2</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-toggle-right"></i> فعال/غیرفعال لینک</span><span class="sr-v" style="color:var(--green-t)">● فعال</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-gauge"></i> سهمیه ترافیک</span><span class="sr-v" style="color:var(--green-t)">● فعال</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-calendar-x"></i> تاریخ انقضا</span><span class="sr-v" style="color:var(--green-t)">● فعال</span></div>
       <div class="sr"><span class="sr-k"><i class="ti ti-ban"></i> قطع خودکار</span><span class="sr-v" style="color:var(--green-t)">● فعال</span></div>
     </div>
   </div>
-  <div class="cl"><i class="ti ti-info-circle"></i><span>در v8.1 هر UUID ناشناخته، حذف‌شده یا غیرفعال قبل از accept پروتکل VLESS رد می‌شود. اتصال بلافاصله با کد 1008 قطع می‌گردد.</span></div>
+  <div class="cl"><i class="ti ti-info-circle"></i><span>در v8.2 هر UUID ناشناخته، حذف‌شده یا غیرفعال قبل از accept پروتکل VLESS رد می‌شود. اتصال بلافاصله با کد 1008 قطع می‌گردد.</span></div>
 </section>
 
 <!-- ERRORS -->
@@ -1218,11 +1238,11 @@ a{color:inherit;text-decoration:none}
 <section class="pg" id="pg-ideas">
   <div class="topbar"><div><div class="tb-title"><i class="ti ti-bulb"></i> ایده‌ها</div></div></div>
   <div class="idea-grid">
-    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-shield-check"></i></div><div class="idea-title">UUID Auth سخت‌گیرانه</div><div class="idea-desc">UUID ناشناخته، حذف‌شده یا غیرفعال قبل از هر پردازشی رد می‌شود.</div><span class="ibadge done">آماده v8.1</span></div>
-    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-device-floppy"></i></div><div class="idea-title">ذخیره دائمی JSON</div><div class="idea-desc">اطلاعات لینک‌ها و رمز عبور روی فایل ذخیره و با restart حفظ می‌شوند.</div><span class="ibadge done">آماده v8</span></div>
-    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-rocket"></i></div><div class="idea-title">Relay بهینه</div><div class="idea-desc">بافر 256KB، TCP_NODELAY، drain هوشمند و relay موازی برای حداکثر throughput.</div><span class="ibadge done">آماده v8.1</span></div>
-    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-sun"></i></div><div class="idea-title">تم روشن / تاریک</div><div class="idea-desc">سویچ بین دارک و لایت مود با ذخیره خودکار تنظیم.</div><span class="ibadge done">آماده v8</span></div>
-    <div class="idea-card"><div class="idea-icon"><i class="ti ti-database"></i></div><div class="idea-title">Redis Persistence</div><div class="idea-desc">اتصال به Redis برای ذخیره‌سازی سریع‌تر و اشتراک state بین instance‌ها.</div><span class="ibadge plan">پیشنهادی</span></div>
+    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-shield-check"></i></div><div class="idea-title">UUID Auth سخت‌گیرانه</div><div class="idea-desc">UUID ناشناخته، حذف‌شده یا غیرفعال قبل از هر پردازشی رد می‌شود.</div><span class="ibadge done">آماده v8.2</span></div>
+    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-device-floppy"></i></div><div class="idea-title">ذخیره دائمی Upstash</div><div class="idea-desc">اطلاعات روی Redis ابری رایگان ذخیره و با restart حفظ می‌شوند.</div><span class="ibadge done">آماده v8.2</span></div>
+    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-rocket"></i></div><div class="idea-title">Relay بهینه</div><div class="idea-desc">بافر 256KB، TCP_NODELAY، drain هوشمند و relay موازی برای حداکثر throughput.</div><span class="ibadge done">آماده v8.2</span></div>
+    <div class="idea-card"><div class="idea-icon" style="background:var(--green-bg);color:var(--green)"><i class="ti ti-sun"></i></div><div class="idea-title">تم روشن / تاریک</div><div class="idea-desc">سویچ بین دارک و لایت مود با ذخیره خودکار تنظیم.</div><span class="ibadge done">آماده v8.2</span></div>
+    <div class="idea-card"><div class="idea-icon"><i class="ti ti-database"></i></div><div class="idea-title">Redis Persistence</div><div class="idea-desc">اتصال به Redis برای ذخیره‌سازی سریع‌تر و اشتراک state بین instance‌ها.</div><span class="ibadge done">آماده v8.2</span></div>
     <div class="idea-card"><div class="idea-icon"><i class="ti ti-brand-telegram"></i></div><div class="idea-title">اعلان تلگرامی</div><div class="idea-desc">ارسال پیام هنگام رسیدن مصرف به ۸۰٪ و ۱۰۰٪ سهمیه از طریق Bot API.</div><span class="ibadge plan">پیشنهادی</span></div>
   </div>
 </section>
